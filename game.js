@@ -13,6 +13,7 @@ const VIEW_DISTANCE = 58;
 const BLOCK = 18;
 const ROAD = 5;
 const PLAYER_RADIUS = 0.28;
+const LOOK_LIMIT = Math.PI / 2 - .006;
 
 let cols = 120;
 let rows = 50;
@@ -20,6 +21,15 @@ let chars = [];
 let colors = [];
 let depthBuffer = [];
 let objectDepth = [];
+let sceneDepth = [];
+let screenYawOffsets = [];
+let screenPitchOffsets = [];
+let screenXScales = [];
+let screenYScales = [];
+let rayAngles = [];
+let rayCosines = [];
+let raySines = [];
+const tileCache = new Map();
 let running = false;
 let lastTime = performance.now();
 let fps = 60;
@@ -50,6 +60,22 @@ function resize() {
   colors = new Array(cols * rows).fill("#000");
   depthBuffer = new Array(cols).fill(VIEW_DISTANCE);
   objectDepth = new Array(cols * rows).fill(Infinity);
+  sceneDepth = new Array(cols * rows).fill(Infinity);
+  screenYawOffsets = new Float32Array(cols);
+  screenPitchOffsets = new Float32Array(rows);
+  screenXScales = new Float32Array(cols);
+  screenYScales = new Float32Array(rows);
+  rayAngles = new Float64Array(cols);
+  rayCosines = new Float64Array(cols);
+  raySines = new Float64Array(cols);
+  for (let x=0;x<cols;x++) {
+    screenYawOffsets[x]=-FOV/2+(x/cols)*FOV;
+    screenXScales[x]=Math.tan(screenYawOffsets[x]);
+  }
+  for (let y=0;y<rows;y++) {
+    screenYScales[y]=(rows*.5-y)/(rows*.9);
+    screenPitchOffsets[y]=Math.atan(screenYScales[y]);
+  }
 }
 
 function floorMod(n, d) { return ((n % d) + d) % d; }
@@ -57,6 +83,10 @@ function floorMod(n, d) { return ((n % d) + d) % d; }
 function tileAt(x, y) {
   const tx = Math.floor(x);
   const ty = Math.floor(y);
+  const cacheKey=`${tx},${ty}`;
+  const cached=tileCache.get(cacheKey);
+  if (cached) return cached;
+  if (tileCache.size>24000) tileCache.clear();
   const lx = floorMod(tx, BLOCK);
   const ly = floorMod(ty, BLOCK);
   const bx = Math.floor(tx / BLOCK);
@@ -65,18 +95,25 @@ function tileAt(x, y) {
   if (lx < ROAD || ly < ROAD) {
     const centerX = lx === 2;
     const centerY = ly === 2;
-    return { solid: false, road: true, mark: centerX || centerY, height: 0, style: 0 };
+    const tile={ solid: false, road: true, mark: centerX || centerY, height: 0, style: 0 };
+    tileCache.set(cacheKey,tile); return tile;
   }
 
   // Alleys split many blocks and make the city permeable on foot.
   const alleyX = lx === 11 && hash(bx, by, 4) > .34;
   const alleyY = ly === 11 && hash(bx, by, 5) > .34;
-  if (alleyX || alleyY) return { solid: false, road: false, mark: false, height: 0, style: 0 };
+  if (alleyX || alleyY) {
+    const tile={ solid: false, road: false, mark: false, height: 0, style: 0 };
+    tileCache.set(cacheKey,tile); return tile;
+  }
 
   // Courtyards and small parks provide variation between towers.
   const lot = (lx < 11 ? 0 : 1) + (ly < 11 ? 0 : 2);
   const density = hash(bx * 2 + lot, by * 2 - lot, 1);
-  if (density < .15) return { solid: false, road: false, park: true, mark: false, height: 0, style: 0 };
+  if (density < .15) {
+    const tile={ solid: false, road: false, park: true, mark: false, height: 0, style: 0 };
+    tileCache.set(cacheKey,tile); return tile;
+  }
 
   const margin = density > .78 ? 1 : 2;
   const cellX = lx < 11 ? lx - ROAD : lx - 12;
@@ -84,8 +121,11 @@ function tileAt(x, y) {
   const cellW = lx < 11 ? 6 : 6;
   const cellH = ly < 11 ? 6 : 6;
   const solid = cellX >= margin && cellX < cellW && cellY >= margin && cellY < cellH;
-  const height = 2.2 + Math.floor(hash(bx, by, lot + 10) * 8) * .7;
-  return { solid, road: false, mark: false, height, style: Math.floor(hash(bx, by, lot + 30) * 4) };
+  const heightSeed=hash(bx,by,lot+10);
+  const skylineBoost=hash(bx,by,lot+70)>.8?4+Math.floor(hash(bx,by,lot+71)*6):0;
+  const height=4.4+Math.floor(heightSeed*12)*.85+skylineBoost;
+  const tile={ solid, road: false, mark: false, height, style: Math.floor(hash(bx, by, lot + 30) * 4) };
+  tileCache.set(cacheKey,tile); return tile;
 }
 
 function collides(x, y, radius = PLAYER_RADIUS) {
@@ -138,9 +178,8 @@ function castRayFrom(originX, originY, angle) {
 
 function castRay(angle) { return castRayFrom(view.x, view.y, angle); }
 
-function castRayLayers(angle, maxLayers = 10) {
+function castRayLayers(angle, maxLayers = 10, dx = Math.cos(angle), dy = Math.sin(angle)) {
   const originX=view.x, originY=view.y;
-  const dx=Math.cos(angle), dy=Math.sin(angle);
   let mapX=Math.floor(originX), mapY=Math.floor(originY);
   const deltaX=Math.abs(1/(dx||.00001)), deltaY=Math.abs(1/(dy||.00001));
   const stepX=dx<0?-1:1, stepY=dy<0?-1:1;
@@ -180,27 +219,82 @@ function projectWorldHeight(worldZ, horizontalDepth) {
   return rows*.5-(vertical/forward)*focal;
 }
 
+function unprojectScreenHeight(screenY,horizontalDepth) {
+  const focal=rows*.9;
+  const k=(rows*.5-screenY)/focal;
+  const cp=Math.cos(view.pitch), sp=Math.sin(view.pitch);
+  const denominator=cp-k*sp;
+  if (Math.abs(denominator)<.0001) return denominator<0?-Infinity:Infinity;
+  return view.z+horizontalDepth*(k*cp+sp)/denominator;
+}
+
+function cameraBlocked(x,y,z) {
+  if (z<.24) return true;
+  const tile=tileAt(x,y);
+  return tile.solid&&z<tile.height+.18;
+}
+
+function castRoofRay(angle,pitch,dx=Math.cos(angle),dy=Math.sin(angle)) {
+  const slope=Math.tan(pitch);
+  if (slope>=-.002) return null;
+  const originX=view.x, originY=view.y;
+  let mapX=Math.floor(originX), mapY=Math.floor(originY);
+  const deltaX=Math.abs(1/(dx||.00001)), deltaY=Math.abs(1/(dy||.00001));
+  const stepX=dx<0?-1:1, stepY=dy<0?-1:1;
+  let sideX=dx<0?(originX-mapX)*deltaX:(mapX+1-originX)*deltaX;
+  let sideY=dy<0?(originY-mapY)*deltaY:(mapY+1-originY)*deltaY;
+  let entry=0;
+  while (entry<VIEW_DISTANCE) {
+    if (sideX<sideY) { entry=sideX; sideX+=deltaX; mapX+=stepX; }
+    else { entry=sideY; sideY+=deltaY; mapY+=stepY; }
+    const exit=Math.min(sideX,sideY);
+    const tile=tileAt(mapX+.5,mapY+.5);
+    if (tile.solid&&view.z>tile.height+.02) {
+      const roofDistance=(tile.height-view.z)/slope;
+      if (roofDistance>=entry-.01&&roofDistance<=exit+.01) return { dist:roofDistance,tile };
+    }
+  }
+  return null;
+}
+
 function renderWorld() {
   updateView();
   chars.fill(" ");
   colors.fill("#07140b");
   objectDepth.fill(Infinity);
+  sceneDepth.fill(Infinity);
   const focal=rows*.9;
   const horizon=rows*.5+Math.tan(view.pitch)*focal;
+  const yawCos=Math.cos(view.angle), yawSin=Math.sin(view.angle);
+  const pitchCos=Math.cos(view.pitch), pitchSin=Math.sin(view.pitch);
+  const forwardX=pitchCos*yawCos, forwardY=pitchCos*yawSin, forwardZ=pitchSin;
+  const rightX=-yawSin, rightY=yawCos;
+  const upX=-pitchSin*yawCos, upY=-pitchSin*yawSin, upZ=pitchCos;
+  for (let x=0;x<cols;x++) {
+    const angle=view.angle+screenYawOffsets[x];
+    rayAngles[x]=angle;
+    rayCosines[x]=Math.cos(angle);
+    raySines[x]=Math.sin(angle);
+  }
 
   // Sky, distant haze, road and sidewalk are all character fields.
   for (let y = 0; y < rows; y++) {
-    const below = y - horizon;
+    const screenY=screenYScales[y];
+    const baseX=forwardX+upX*screenY;
+    const baseY=forwardY+upY*screenY;
+    const rayZ=forwardZ+upZ*screenY;
     for (let x = 0; x < cols; x++) {
-      const verticalAngle=view.pitch+Math.atan((rows*.5-y)/focal);
-      if (verticalAngle>=-.002) {
+      if (rayZ>=-.0001) {
         const star = hash(x, y, 90) > .996 && y < horizon * .65;
         put(x, y, star ? "." : " ", star ? "#7ba384" : "#061109");
       } else {
-        const rayYaw=view.angle-FOV/2+(x/cols)*FOV;
-        const perspective=Math.min(VIEW_DISTANCE*1.5,view.z/-Math.tan(verticalAngle));
-        const wx=view.x+Math.cos(rayYaw)*perspective;
-        const wy=view.y+Math.sin(rayYaw)*perspective;
+        const rayX=baseX+rightX*screenXScales[x];
+        const rayY=baseY+rightY*screenXScales[x];
+        let distance=view.z/-rayZ;
+        const horizontalDistance=distance*Math.hypot(rayX,rayY);
+        if (horizontalDistance>VIEW_DISTANCE*1.5) distance*=VIEW_DISTANCE*1.5/horizontalDistance;
+        const wx=view.x+rayX*distance;
+        const wy=view.y+rayY*distance;
         const t = tileAt(wx, wy);
         let ch = t.road ? (t.mark ? ":" : ".") : t.park ? "'" : ",";
         if (hash(Math.floor(wx * 2), Math.floor(wy * 2), 8) > .88) ch = t.road ? "·" : ";";
@@ -210,9 +304,9 @@ function renderWorld() {
   }
 
   for (let x = 0; x < cols; x++) {
-    const rayAngle = view.angle - FOV / 2 + (x / cols) * FOV;
-    const layers=castRayLayers(rayAngle);
-    const correction=Math.cos(rayAngle-view.angle);
+    const rayAngle=rayAngles[x];
+    const layers=castRayLayers(rayAngle,10,rayCosines[x],raySines[x]);
+    const correction=Math.cos(screenYawOffsets[x]);
     depthBuffer[x]=layers.length?layers[0].dist*correction:VIEW_DISTANCE;
     for (let layerIndex=layers.length-1; layerIndex>=0; layerIndex--) {
       const ray=layers[layerIndex];
@@ -227,14 +321,56 @@ function renderWorld() {
       const ramp=wallRamps[style];
       const palette=buildingPalettes[style];
       const shadeIndex=clamp(Math.floor(corrected/7),0,ramp.length-1);
+      const rgb=palette.wall.map(component=>Math.min(255,Math.floor(light*component)));
+      const wallColor=`rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
       for (let y=Math.max(0,Math.floor(top)); y<Math.min(rows,Math.ceil(bottom)); y++) {
-        const relY=(y-top)/Math.max(1,wallHeight);
-        const windowBand=Math.floor(relY*ray.tile.height*2.1)%2===0;
+        const worldZ=clamp(unprojectScreenHeight(y+.5,corrected),0,ray.tile.height);
+        const windowBand=Math.floor(worldZ*2.1)%2===0;
         const windowColumn=Math.floor(ray.wallX*8)%3===1;
-        const lit=windowBand&&windowColumn&&corrected<34&&hash(Math.floor(ray.wallX*20),Math.floor(relY*30),style)>.47;
+        const lit=windowBand&&windowColumn&&corrected<34&&hash(Math.floor(ray.wallX*20),Math.floor(worldZ*6),style)>.47;
         const ch=lit?(style%2?"[]"[x%2]:"¤"):ramp[shadeIndex];
+        const index=y*cols+x;
+        if (corrected<sceneDepth[index]) {
+          sceneDepth[index]=corrected;
+          put(x,y,ch,lit?palette.window:wallColor);
+        }
+      }
+    }
+  }
+
+  // Downward camera rays can strike horizontal rooftops before the ground.
+  // Per-cell depth keeps roofs behind nearer walls and in front of farther towers.
+  if (view.z>2.15) {
+    const roofChars=["^","~",":","="];
+    for (let y=0; y<rows; y+=2) {
+      const sampleY=Math.min(rows-1,y+1);
+      const screenY=screenYScales[sampleY];
+      const baseX=forwardX+upX*screenY;
+      const baseY=forwardY+upY*screenY;
+      const rayZ=forwardZ+upZ*screenY;
+      if (rayZ>=-.0001) continue;
+      for (let x=0; x<cols; x+=2) {
+        const sampleX=Math.min(cols-1,x+1);
+        const rayX=baseX+rightX*screenXScales[sampleX];
+        const rayY=baseY+rightY*screenXScales[sampleX];
+        const horizontalLength=Math.hypot(rayX,rayY);
+        if (horizontalLength<.0001) continue;
+        const rayYaw=Math.atan2(rayY,rayX);
+        const rayPitch=Math.atan2(rayZ,horizontalLength);
+        const roof=castRoofRay(rayYaw,rayPitch,rayX/horizontalLength,rayY/horizontalLength);
+        if (!roof) continue;
+        const corrected=roof.dist*Math.cos(rayYaw-view.angle);
+        const style=roof.tile.style;
+        const palette=buildingPalettes[style];
+        const light=clamp(155-corrected*2,65,155);
         const rgb=palette.wall.map(component=>Math.min(255,Math.floor(light*component)));
-        put(x,y,ch,lit?palette.window:`rgb(${rgb[0]},${rgb[1]},${rgb[2]})`);
+        const color=`rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+        for (let yy=y;yy<Math.min(rows,y+2);yy++) for (let xx=x;xx<Math.min(cols,x+2);xx++) {
+          const index=yy*cols+xx;
+          if (corrected>=sceneDepth[index]) continue;
+          sceneDepth[index]=corrected;
+          put(xx,yy,roofChars[style],color);
+        }
       }
     }
   }
@@ -257,26 +393,27 @@ function updateView() {
 
   const targetX=player.x, targetY=player.y;
   const targetZ=car.occupied?1.08:player.z+1.73;
-  const followDistance=car.occupied?23:17;
-  const pitch=clamp(orbitPitch,-1.02,.68);
-  const horizontalFactor=Math.cos(pitch);
-  const minimumDistance=car.occupied?2:.7;
+  const followDistance=car.occupied?11.5:8.5;
+  const pitch=clamp(orbitPitch,-.48,.22);
+  const minimumDistance=car.occupied?1.8:.6;
+  const maximumHeight=targetZ+(car.occupied?9:7.5);
 
-  // Probe outward from the target. The last safe point becomes the camera,
-  // producing the same wall-avoidance behavior as a modern chase camera.
-  let chosen=minimumDistance;
+  // This is a game-style camera boom, not a spherical orbit: horizontal
+  // distance stays constant while pitch changes camera height. Probe every
+  // point along that boom and shorten only when geometry blocks it.
+  let chosen=car.occupied?1.15:.35;
   for (let d=minimumDistance; d<=followDistance; d+=.25) {
-    const horizontal=d*horizontalFactor;
-    const cx=targetX-Math.cos(orbitYaw)*horizontal;
-    const cy=targetY-Math.sin(orbitYaw)*horizontal;
-    if (collides(cx,cy,.22)) break;
+    const cx=targetX-Math.cos(orbitYaw)*d;
+    const cy=targetY-Math.sin(orbitYaw)*d;
+    const cz=clamp(targetZ-pitch*d,.28,maximumHeight);
+    if (cameraBlocked(cx,cy,cz)) break;
     chosen=d;
   }
 
-  const horizontalDistance=Math.max(.2,chosen*horizontalFactor);
+  const horizontalDistance=Math.max(.2,chosen);
   view.x=targetX-Math.cos(orbitYaw)*horizontalDistance;
   view.y=targetY-Math.sin(orbitYaw)*horizontalDistance;
-  view.z=Math.max(.28,targetZ-Math.sin(pitch)*chosen);
+  view.z=clamp(targetZ-pitch*chosen,.28,maximumHeight);
   view.angle=Math.atan2(targetY-view.y,targetX-view.x);
   view.pitch=Math.atan2(targetZ-view.z,horizontalDistance);
 }
@@ -348,14 +485,14 @@ function renderDynamicModels() {
   if (!boxes.length) return;
 
   for (let x=0; x<cols; x++) {
-    const rayAngle=view.angle-FOV/2+(x/cols)*FOV;
-    const dirX=Math.cos(rayAngle), dirY=Math.sin(rayAngle);
-    const correction=Math.cos(rayAngle-view.angle);
+    const rayAngle=rayAngles[x];
+    const dirX=rayCosines[x], dirY=raySines[x];
+    const correction=Math.cos(screenYawOffsets[x]);
     for (const box of boxes) {
       const hit=rayOrientedBox(view.x,view.y,dirX,dirY,box);
       if (!hit) continue;
       const depth=hit.distance*correction;
-      if (depth<=.08 || depth>=depthBuffer[x]) continue;
+      if (depth<=.08 || depth>=VIEW_DISTANCE) continue;
       const top=Math.floor(projectWorldHeight(box.z1,depth));
       const bottom=Math.ceil(projectWorldHeight(box.z0,depth));
       const fog=clamp(1-depth/VIEW_DISTANCE,.25,1);
@@ -363,7 +500,7 @@ function renderDynamicModels() {
       const ch=box.chars[hit.axis];
       for (let y=Math.max(0,top); y<Math.min(rows,bottom); y++) {
         const index=y*cols+x;
-        if (depth<objectDepth[index]) {
+        if (depth<objectDepth[index]&&depth<sceneDepth[index]) {
           objectDepth[index]=depth;
           put(x,y,ch,color);
         }
@@ -551,12 +688,12 @@ addEventListener("keydown", e => {
     cameraMode = cameraMode === "first" ? "third" : "first";
     if (cameraMode === "third") {
       orbitYaw=player.angle;
-      orbitPitch=clamp(player.pitch,-.45,.45);
+      orbitPitch=clamp(player.pitch,-.32,.16);
     } else if (car.occupied) {
       player.angle=car.angle;
     } else {
       player.angle=orbitYaw;
-      player.pitch=clamp(orbitPitch,-.62,.62);
+      player.pitch=clamp(orbitPitch,-LOOK_LIMIT,LOOK_LIMIT);
     }
   }
 });
@@ -565,10 +702,10 @@ addEventListener("mousemove", e => {
   if (document.pointerLockElement !== canvas || !running) return;
   if (cameraMode === "third") {
     orbitYaw += e.movementX * .0026;
-    orbitPitch = clamp(orbitPitch - e.movementY * .0026, -1.02, .68);
+    orbitPitch = clamp(orbitPitch - e.movementY * .0026, -.48, .22);
   } else {
     player.angle += e.movementX * .0022;
-    player.pitch = clamp(player.pitch - e.movementY * .0022, -.62, .62);
+    player.pitch = clamp(player.pitch - e.movementY * .0022, -LOOK_LIMIT, LOOK_LIMIT);
   }
 });
 canvas.addEventListener("click", () => running && canvas.requestPointerLock());
