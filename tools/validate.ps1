@@ -21,7 +21,7 @@ try {
 
     Write-Host "[3/4] Checking required game hooks"
     $game = Get-Content -Raw game.js
-    @("tileAt", "neighborhoodAt", "buildingDescriptor", "externalRampAt", "rampSurfaceHeight", "exteriorRampBand", "walkingSurfaceHeight", "walkingBlocked", "roofEdgeBlocked", "recoverStuckPlayer", "castRay", "castRayLayers", "castRoofRay", "cameraBlocked", "projectWorldHeight", "unprojectScreenHeight", "updateWalking", "updateVehicleChaseCamera", "updateCar", "updateHelicopter", "updateView", "toggleVehicle", "truckCollides", "helicopterBlocked", "rayOrientedBox", "renderDynamicModels", "renderHelicopterCockpit", "acceptPeerState", "connectMultiplayer", "sendNetworkState") | ForEach-Object {
+    @("tileAt", "neighborhoodAt", "buildingDescriptor", "ladderContactAt", "ladderStripe", "walkingSurfaceHeight", "walkingBlocked", "roofEdgeBlocked", "recoverStuckPlayer", "castRay", "castRayLayers", "castWallCellRay", "castRoofRay", "cameraBlocked", "projectWorldHeight", "unprojectScreenHeight", "updateWalking", "updateVehicleChaseCamera", "updateCar", "updateHelicopter", "updateView", "toggleVehicle", "truckCollides", "helicopterBlocked", "rayOrientedBox", "renderDynamicModels", "renderHelicopterCockpit", "acceptPeerState", "connectMultiplayer", "sendNetworkState") | ForEach-Object {
         if ($game -notmatch "function\s+$($_)\s*\(") { throw "Missing required function: $_" }
     }
     Write-Host "[4/4] Running procedural and aerial smoke checks"

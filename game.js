@@ -38,7 +38,7 @@ let lastTime = performance.now();
 let fps = 60;
 const keys = new Set();
 
-const player = { x: 2.5, y: 2.5, z: 0, vz: 0, angle: 0, facing: 0, pitch: 0, onGround: true, crouching: false, crouchAmount: 0, sprinting: false };
+const player = { x: 2.5, y: 2.5, z: 0, vz: 0, angle: 0, facing: 0, pitch: 0, onGround: true, onLadder: false, crouching: false, crouchAmount: 0, sprinting: false };
 const safePlayerPosition = { x: player.x, y: player.y, z: player.z };
 const car = { x: 8, y: 2.5, angle: 0, speed: 0, steer: 0, occupied: false };
 const helicopter = { x: 2.5, y: 5, z: .08, angle: Math.PI/2, speed: 0, vz: 0, occupied: false, rotorAngle: 0, rotorPower: 0 };
@@ -153,55 +153,32 @@ function buildingDescriptor(bx,by,lot) {
     if (accent>.72) height+=5+Math.floor(hash(bx,by,lot+71)*9);
   }
   const baseX=lot%2?12:5, baseY=lot>1?12:5;
+  const roadSides=lot===0?["west","north"]:lot===1?["north","east"]:lot===2?["west","south"]:["east","south"];
+  const ladderSide=roadSides[hash(bx,by,lot+211)>.5?1:0];
+  const minX=bx*BLOCK+baseX+margin, maxX=bx*BLOCK+baseX+6;
+  const minY=by*BLOCK+baseY+margin, maxY=by*BLOCK+baseY+6;
   const descriptor={
     key,exists,margin,height:Math.max(4.4,height),style:Math.floor(hash(bx,by,lot+30)*4),
-    hasRamp:exists&&hash(bx,by,lot+210)<.18,
-    minX:bx*BLOCK+baseX+margin,maxX:bx*BLOCK+baseX+6,
-    minY:by*BLOCK+baseY+margin,maxY:by*BLOCK+baseY+6
+    hasLadder:exists&&hash(bx,by,lot+210)<.18,ladderSide,
+    minX,maxX,minY,maxY,
+    ladderCoord:ladderSide==="west"||ladderSide==="east"?(minY+maxY)*.5:(minX+maxX)*.5
   };
   buildingCache.set(key,descriptor);
   return descriptor;
 }
 
-function externalRampAt(x,y) {
+function ladderContactAt(x,y) {
   const centerBX=Math.floor(x/BLOCK), centerBY=Math.floor(y/BLOCK);
   for (let by=centerBY-1;by<=centerBY+1;by++) for (let bx=centerBX-1;bx<=centerBX+1;bx++) for (let lot=0;lot<4;lot++) {
     const building=buildingDescriptor(bx,by,lot);
-    if (!building.hasRamp) continue;
-    const width=building.maxX-building.minX, height=building.maxY-building.minY;
-    const perimeter=2*(width+height);
-    if (x>=building.maxX&&x<building.maxX+.85&&y>=building.minY-.85&&y<building.minY) {
-      return {building,phase:width/perimeter,side:"north-east"};
-    }
-    if (x>=building.maxX&&x<building.maxX+.85&&y>=building.maxY&&y<building.maxY+.85) {
-      return {building,phase:(width+height)/perimeter,side:"south-east"};
-    }
-    if (x>=building.minX-.85&&x<building.minX&&y>=building.maxY&&y<building.maxY+.85) {
-      return {building,phase:(2*width+height)/perimeter,side:"south-west"};
-    }
-    if (x>=building.minX-.85&&x<building.minX&&y>=building.minY-.85&&y<building.minY) {
-      return {building,phase:1,side:"north-west"};
-    }
-    if (x>=building.minX&&x<building.maxX&&y>=building.minY-.85&&y<building.minY) {
-      return {building,phase:(x-building.minX)/perimeter,side:"north"};
-    }
-    if (x>=building.maxX&&x<building.maxX+.85&&y>=building.minY&&y<building.maxY) {
-      return {building,phase:(width+y-building.minY)/perimeter,side:"east"};
-    }
-    if (x>=building.minX&&x<building.maxX&&y>=building.maxY&&y<building.maxY+.85) {
-      return {building,phase:(width+height+building.maxX-x)/perimeter,side:"south"};
-    }
-    if (x>=building.minX-.85&&x<building.minX&&y>=building.minY&&y<building.maxY) {
-      return {building,phase:(2*width+height+building.maxY-y)/perimeter,side:"west"};
-    }
+    if (!building.hasLadder) continue;
+    const side=building.ladderSide, width=.5;
+    if (side==="west"&&x>=building.minX-.62&&x<building.minX&&Math.abs(y-building.ladderCoord)<width) return {building,nx:1,ny:0};
+    if (side==="east"&&x>building.maxX&&x<=building.maxX+.62&&Math.abs(y-building.ladderCoord)<width) return {building,nx:-1,ny:0};
+    if (side==="north"&&y>=building.minY-.62&&y<building.minY&&Math.abs(x-building.ladderCoord)<width) return {building,nx:0,ny:1};
+    if (side==="south"&&y>building.maxY&&y<=building.maxY+.62&&Math.abs(x-building.ladderCoord)<width) return {building,nx:0,ny:-1};
   }
   return null;
-}
-
-function decorateExternalRamp(tile,tx,ty) {
-  if (tile.solid) return tile;
-  const ramp=externalRampAt(tx+.5,ty+.5);
-  return ramp?{...tile,externalRamp:true,vehicleSolid:true,rampPhase:ramp.phase,rampHeight:ramp.building.height,rampBuildingId:ramp.building.key,rampSide:ramp.side}:tile;
 }
 
 function tileAt(x, y) {
@@ -219,7 +196,7 @@ function tileAt(x, y) {
   if (lx < ROAD || ly < ROAD) {
     const centerX = lx === 2;
     const centerY = ly === 2;
-    const tile=decorateExternalRamp({ solid: false, road: true, mark: centerX || centerY, height: 0, style: 0 },tx,ty);
+    const tile={ solid: false, road: true, mark: centerX || centerY, height: 0, style: 0 };
     tileCache.set(cacheKey,tile); return tile;
   }
 
@@ -227,7 +204,7 @@ function tileAt(x, y) {
   const alleyX = lx === 11 && hash(bx, by, 4) > .34;
   const alleyY = ly === 11 && hash(bx, by, 5) > .34;
   if (alleyX || alleyY) {
-    const tile=decorateExternalRamp({ solid: false, road: false, mark: false, height: 0, style: 0 },tx,ty);
+    const tile={ solid: false, road: false, mark: false, height: 0, style: 0 };
     tileCache.set(cacheKey,tile); return tile;
   }
 
@@ -235,7 +212,7 @@ function tileAt(x, y) {
   const lot = (lx < 11 ? 0 : 1) + (ly < 11 ? 0 : 2);
   const building=buildingDescriptor(bx,by,lot);
   if (!building.exists) {
-    const tile=decorateExternalRamp({ solid: false, road: false, park: true, mark: false, height: 0, style: 0 },tx,ty);
+    const tile={ solid: false, road: false, park: true, mark: false, height: 0, style: 0 };
     tileCache.set(cacheKey,tile); return tile;
   }
 
@@ -245,9 +222,9 @@ function tileAt(x, y) {
   const cellW = lx < 11 ? 6 : 6;
   const cellH = ly < 11 ? 6 : 6;
   const solid = cellX >= margin && cellX < cellW && cellY >= margin && cellY < cellH;
-  let tile={ solid, road: false, mark: false, height: building.height, style: building.style,buildingId:solid?building.key:null,hasExternalRamp:solid&&building.hasRamp,
+  const tile={ solid, road: false, mark: false, height: building.height, style: building.style,buildingId:solid?building.key:null,
+    hasLadder:solid&&building.hasLadder,ladderSide:building.ladderSide,ladderCoord:building.ladderCoord,
     buildingMinX:building.minX,buildingMaxX:building.maxX,buildingMinY:building.minY,buildingMaxY:building.maxY };
-  tile=decorateExternalRamp(tile,tx,ty);
   tileCache.set(cacheKey,tile); return tile;
 }
 
@@ -256,21 +233,12 @@ function collides(x, y, radius = PLAYER_RADIUS) {
   return pts.some(([dx, dy]) => tileAt(x + dx, y + dy).solid);
 }
 
-function rampSurfaceHeight(tile,feetZ) {
-  const rise=1.8;
-  const withinLoop=tile.rampPhase*rise;
-  const circuit=Math.round((feetZ-withinLoop)/rise);
-  return clamp(withinLoop+circuit*rise,0,tile.rampHeight);
-}
-
 function walkingSurfaceHeight(x,y,radius=PLAYER_RADIUS,feetZ=player.z) {
   let surface=0;
   const centerTile=tileAt(x,y);
   for (const [dx,dy] of [[0,0],[-radius,-radius],[radius,-radius],[-radius,radius],[radius,radius]]) {
     const tile=tileAt(x+dx,y+dy);
-    if (centerTile.externalRamp) {
-      if (tile.externalRamp&&tile.rampBuildingId===centerTile.rampBuildingId) surface=Math.max(surface,rampSurfaceHeight(tile,feetZ));
-    } else if (tile.solid) surface=Math.max(surface,tile.height);
+    if (tile.solid) surface=Math.max(surface,tile.height);
   }
   return surface;
 }
@@ -406,18 +374,45 @@ const buildingPalettes = [
   { wall:[.82,.48,1], window:"#f1b5ff" }
 ];
 
-function exteriorRampBand(tile,face,x,y,worldZ) {
-  if (!tile.hasExternalRamp) return false;
-  const width=tile.buildingMaxX-tile.buildingMinX, height=tile.buildingMaxY-tile.buildingMinY;
-  const perimeter=2*(width+height);
-  let phase;
-  if (face==="north") phase=(x-tile.buildingMinX)/perimeter;
-  else if (face==="east") phase=(width+y-tile.buildingMinY)/perimeter;
-  else if (face==="south") phase=(width+height+tile.buildingMaxX-x)/perimeter;
-  else phase=(2*width+height+tile.buildingMaxY-y)/perimeter;
-  const rise=1.8, base=clamp(phase,0,1)*rise;
-  const nearest=base+Math.round((worldZ-base)/rise)*rise;
-  return Math.abs(worldZ-nearest)<.14;
+function ladderStripe(tile,face,x,y,worldZ) {
+  if (!tile.hasLadder||face!==tile.ladderSide||worldZ<0||worldZ>tile.height+.05) return false;
+  const along=face==="west"||face==="east"?y:x;
+  return Math.abs(along-tile.ladderCoord)<.38;
+}
+
+// At steep downward angles, trace each character cell in full camera space.
+// This makes wall silhouettes and roofs share the same rectilinear projection,
+// instead of bending walls with the faster one-column facade approximation.
+function castWallCellRay(rayX,rayY,rayZ,maxDistance=VIEW_DISTANCE*2) {
+  let mapX=Math.floor(view.x), mapY=Math.floor(view.y);
+  const deltaX=Math.abs(1/(rayX||.000001)), deltaY=Math.abs(1/(rayY||.000001));
+  const stepX=rayX<0?-1:1, stepY=rayY<0?-1:1;
+  let sideX=rayX<0?(view.x-mapX)*deltaX:(mapX+1-view.x)*deltaX;
+  let sideY=rayY<0?(view.y-mapY)*deltaY:(mapY+1-view.y)*deltaY;
+  let current=tileAt(mapX+.5,mapY+.5);
+  while (Math.min(sideX,sideY)<maxDistance) {
+    let distance,side,face;
+    const previous=current;
+    if (sideX<sideY) {
+      distance=sideX; sideX+=deltaX; mapX+=stepX; side=0;
+      face=rayX>0?"west":"east";
+    } else {
+      distance=sideY; sideY+=deltaY; mapY+=stepY; side=1;
+      face=rayY>0?"north":"south";
+    }
+    current=tileAt(mapX+.5,mapY+.5);
+    if (previous.solid===current.solid) continue;
+    const entering=current.solid;
+    const tile=entering?current:previous;
+    const wallFace=entering?face:(face==="west"?"east":face==="east"?"west":face==="north"?"south":"north");
+    const worldZ=view.z+rayZ*distance;
+    if (worldZ>=0&&worldZ<=tile.height) {
+      const hitX=view.x+rayX*distance, hitY=view.y+rayY*distance;
+      return {distance,tile,side,face:wallFace,hitX,hitY,worldZ,wallX:fract(side===0?hitY:hitX)};
+    }
+    if (worldZ<0&&rayZ<0) break;
+  }
+  return null;
 }
 
 function projectWorldHeight(worldZ, horizontalDepth) {
@@ -523,14 +518,37 @@ function renderWorld() {
         const wx=view.x+rayX*distance;
         const wy=view.y+rayY*distance;
         const t = tileAt(wx, wy);
-        let ch = t.externalRamp ? "/" : t.road ? (t.mark ? ":" : ".") : t.park ? "'" : ",";
+        let ch = t.road ? (t.mark ? ":" : ".") : t.park ? "'" : ",";
         if (hash(Math.floor(wx * 2), Math.floor(wy * 2), 8) > .88) ch = t.road ? "·" : ";";
-        put(x, y, ch, t.externalRamp ? "#d8b66f" : t.road ? "#35513d" : t.park ? "#386a3d" : "#46574a");
+        put(x, y, ch, t.road ? "#35513d" : t.park ? "#386a3d" : "#46574a");
       }
     }
   }
 
-  for (let x = 0; x < cols; x++) {
+  const preciseDownWalls=view.pitch<-.55;
+  if (preciseDownWalls) for (let y=0;y<rows;y++) {
+    const baseX=forwardX+upX*screenYScales[y];
+    const baseY=forwardY+upY*screenYScales[y];
+    const rayZ=forwardZ+upZ*screenYScales[y];
+    for (let x=0;x<cols;x++) {
+      const rayX=baseX+rightX*screenXScales[x];
+      const rayY=baseY+rightY*screenXScales[x];
+      const ray=castWallCellRay(rayX,rayY,rayZ);
+      if (!ray) continue;
+      const index=y*cols+x, fog=clamp(1-ray.distance/VIEW_DISTANCE,0,1);
+      const style=ray.tile.style, ramp=wallRamps[style], palette=buildingPalettes[style];
+      const light=Math.floor(48+176*fog*(ray.side?.72:1));
+      const rgb=palette.wall.map(component=>Math.min(255,Math.floor(light*component)));
+      const ladder=ladderStripe(ray.tile,ray.face,ray.hitX,ray.hitY,ray.worldZ);
+      const windowBand=Math.floor(ray.worldZ*2.1)%2===0;
+      const windowColumn=Math.floor(ray.wallX*8)%3===1;
+      const lit=windowBand&&windowColumn&&ray.distance<34&&hash(Math.floor(ray.wallX*20),Math.floor(ray.worldZ*6),style)>.47;
+      sceneDepth[index]=ray.distance;
+      put(x,y,ladder?(Math.floor(ray.worldZ*2)%2?"H":"|"):lit?(style%2?"[]"[x%2]:"¤"):ramp[clamp(Math.floor(ray.distance/7),0,ramp.length-1)],ladder?"#a96f35":lit?palette.window:`rgb(${rgb[0]},${rgb[1]},${rgb[2]})`);
+    }
+  }
+
+  if (!preciseDownWalls) for (let x = 0; x < cols; x++) {
     const rayAngle=rayAngles[x];
     const layers=castRayLayers(rayAngle,10,rayCosines[x],raySines[x]);
     const correction=Math.cos(screenYawOffsets[x]);
@@ -552,16 +570,16 @@ function renderWorld() {
       const wallColor=`rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
       for (let y=Math.max(0,Math.floor(top)); y<Math.min(rows,Math.ceil(bottom)); y++) {
         const worldZ=clamp(unprojectScreenHeight(y+.5,corrected),0,ray.tile.height);
-        const rampBand=exteriorRampBand(ray.tile,ray.face,ray.hitX,ray.hitY,worldZ);
+        const ladder=ladderStripe(ray.tile,ray.face,ray.hitX,ray.hitY,worldZ);
         const windowBand=Math.floor(worldZ*2.1)%2===0;
         const windowColumn=Math.floor(ray.wallX*8)%3===1;
         const lit=windowBand&&windowColumn&&corrected<34&&hash(Math.floor(ray.wallX*20),Math.floor(worldZ*6),style)>.47;
-        const ch=rampBand?"/":lit?(style%2?"[]"[x%2]:"¤"):ramp[shadeIndex];
+        const ch=ladder?(Math.floor(worldZ*2)%2?"H":"|"):lit?(style%2?"[]"[x%2]:"¤"):ramp[shadeIndex];
         const index=y*cols+x;
         const cellDepth=corrected*pitchCos+(worldZ-view.z)*pitchSin;
         if (cellDepth>.04&&cellDepth<sceneDepth[index]) {
           sceneDepth[index]=cellDepth;
-          put(x,y,ch,rampBand?"#e2c27b":lit?palette.window:wallColor);
+          put(x,y,ch,ladder?"#a96f35":lit?palette.window:wallColor);
         }
       }
     }
@@ -703,7 +721,7 @@ function helicopterBoxes(source=helicopter,styleIndex=localStyle) {
     offsetBox(x,y,a,-.45,.72,{length:.12,width:.12,z0:z+.12,z1:z+.55,color:"#a9935d",chars:["|","|"]}),
     offsetBox(x,y,rotorA,0,0,{length:6.7,width:.1,z0:z+1.68,z1:z+1.76,color:"#efffc9",chars:["=","-"]}),
     offsetBox(x,y,rotorA+Math.PI/2,0,0,{length:6.7,width:.1,z0:z+1.67,z1:z+1.75,color:"#d7e8b6",chars:["=","-"]}),
-    offsetBox(tailX,tailY,a+Math.PI/2,0,0,{length:tailHorizontal,width:.08,z0:tailCenter-.045,z1:tailCenter+.045,color:"#f6d279",chars:["+","-"]}),
+    offsetBox(tailX,tailY,a,0,0,{length:tailHorizontal,width:.08,z0:tailCenter-.045,z1:tailCenter+.045,color:"#f6d279",chars:["+","-"]}),
     offsetBox(tailX,tailY,a+Math.PI/2,0,0,{length:.09,width:.09,z0:tailCenter-tailVertical,z1:tailCenter+tailVertical,color:"#f6d279",chars:["|","|"]})
   ];
 }
@@ -908,7 +926,7 @@ function renderHud() {
     put(mapX+mx, mapY+my+4, t.solid?"#":t.road?".":"·", t.solid?"#477b52":"#78bc85");
   }
   put(mapX, mapY+4, helicopter.occupied?"H":car.occupied?"V":"@", "#e6ff81");
-  const help = helicopter.occupied ? "W/S FLY  A/D YAW  SPACE RISE  SHIFT DESCEND  CTRL+MOUSE FREE LOOK  E EXIT  V VIEW" : car.occupied ? "W/S THROTTLE  A/D STEER  SPACE BRAKE  CTRL+MOUSE FREE LOOK  E EXIT  V VIEW" : "WASD MOVE  DOUBLE-W SPRINT  SHIFT SNEAK  SPACE JUMP  E VEHICLE  V VIEW";
+  const help = helicopter.occupied ? "W/S FLY  A/D YAW  SPACE RISE  SHIFT DESCEND  HOLD C + MOUSE FREE LOOK  E EXIT  V VIEW" : car.occupied ? "W/S THROTTLE  A/D STEER  SPACE BRAKE  HOLD C + MOUSE FREE LOOK  E EXIT  V VIEW" : "WASD MOVE  DOUBLE-W SPRINT  SHIFT SNEAK  SPACE JUMP  E VEHICLE  V VIEW";
   [...help].forEach((ch,i)=>put(2+i, rows-2, ch, "#4d8158"));
 }
 
@@ -948,11 +966,13 @@ function update(dt) {
   else if (car.occupied) updateCar(dt);
   else {
     updateWalking(dt);
-    player.vz -= 12 * dt;
-    player.z += player.vz * dt;
-    const surface=walkingSurfaceHeight(player.x,player.y);
-    if (player.z <= surface) { player.z = surface; player.vz = 0; player.onGround = true; }
-    else player.onGround=false;
+    if (!player.onLadder) {
+      player.vz -= 12 * dt;
+      player.z += player.vz * dt;
+      const surface=walkingSurfaceHeight(player.x,player.y);
+      if (player.z <= surface) { player.z = surface; player.vz = 0; player.onGround = true; }
+      else player.onGround=false;
+    }
     recoverStuckPlayer();
     if (player.onGround&&!walkingBlocked(player.x,player.y,player.z)) {
       safePlayerPosition.x=player.x; safePlayerPosition.y=player.y; safePlayerPosition.z=player.z;
@@ -981,11 +1001,23 @@ function updateWalking(dt) {
   const moveX = Math.cos(movementAngle)*forward + Math.cos(movementAngle+Math.PI/2)*strafe;
   const moveY = Math.sin(movementAngle)*forward + Math.sin(movementAngle+Math.PI/2)*strafe;
   if (Math.hypot(moveX,moveY)>.01) player.facing=Math.atan2(moveY,moveX);
+  player.onLadder=false;
+  const ladder=ladderContactAt(player.x,player.y);
+  if (ladder&&player.z<=ladder.building.height+.08) {
+    const movingToward=moveX*ladder.nx+moveY*ladder.ny>.25;
+    const holdingDirection=Math.hypot(moveX,moveY)>.01;
+    if (movingToward||!holdingDirection) {
+      player.onLadder=true;
+      player.onGround=false;
+      player.vz=0;
+      player.z=clamp(player.z+(movingToward?2.45:-.72)*dt,0,ladder.building.height);
+    }
+  }
   movePlayer(moveX*speed*dt, moveY*speed*dt);
 }
 
 function updateVehicleChaseCamera(vehicleAngle,defaultPitch,dt) {
-  if (cameraMode!=="third"||keys.has("ControlLeft")||keys.has("ControlRight")) return;
+  if (cameraMode!=="third"||keys.has("KeyC")) return;
   const yawBlend=1-Math.exp(-dt*3.2);
   const pitchBlend=1-Math.exp(-dt*2.25);
   const yawDelta=Math.atan2(Math.sin(vehicleAngle-orbitYaw),Math.cos(vehicleAngle-orbitYaw));
@@ -1160,7 +1192,7 @@ function loop(now) {
 addEventListener("resize", resize);
 addEventListener("keydown", e => {
   keys.add(e.code);
-  if (["Space","ArrowUp","ArrowDown"].includes(e.code)) e.preventDefault();
+  if (["Space","ArrowUp","ArrowDown","KeyC"].includes(e.code)) e.preventDefault();
   if (e.code==="KeyW"&&!e.repeat&&!car.occupied&&!helicopter.occupied) {
     const now=performance.now();
     if (forwardReleased&&now-lastForwardTap<=320) player.sprinting=true;
@@ -1190,7 +1222,7 @@ addEventListener("mousemove", e => {
   if (document.pointerLockElement !== canvas || !running) return;
   if (cameraMode === "third") {
     const occupied=car.occupied||helicopter.occupied;
-    const freeLook=keys.has("ControlLeft")||keys.has("ControlRight");
+    const freeLook=keys.has("KeyC");
     if (occupied&&!freeLook) return;
     orbitYaw += e.movementX * .0026;
     orbitPitch = clamp(orbitPitch - e.movementY * .0026, -2.4, .55);

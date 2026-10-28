@@ -25,29 +25,37 @@ const sandbox=vm.createContext({
 vm.runInContext(await readFile(new URL("../game.js",import.meta.url),"utf8"),sandbox,{filename:"game.js"});
 
 const accessAudit=vm.runInContext(`(() => {
-  let count=0,rampCount=0,roofSample=null;
+  let count=0,ladderCount=0,roofSample=null,ladderSample=null;
   const invalid=[];
   for (let by=-2;by<=2;by++) for (let bx=-2;bx<=2;bx++) for (let lot=0;lot<4;lot++) {
     const building=buildingDescriptor(bx,by,lot);
     if (!building.exists) continue;
     count++;
     if (!roofSample) roofSample={x:building.minX+.5,y:building.minY+.5,height:building.height,buildingId:building.key};
-    if (!building.hasRamp) continue;
-    rampCount++;
-    let tiles=0,reachesRoof=false;
-    for (let y=Math.floor(building.minY)-1;y<=Math.ceil(building.maxY);y++) for (let x=Math.floor(building.minX)-1;x<=Math.ceil(building.maxX);x++) {
-      const tile=tileAt(x+.5,y+.5);
-      if (!tile.externalRamp||tile.rampBuildingId!==building.key) continue;
-      tiles++;
-      const surface=rampSurfaceHeight(tile,building.height);
-      if (!Number.isFinite(surface)||surface<0||surface>building.height||!tile.vehicleSolid) invalid.push(building.key);
-      reachesRoof||=Math.abs(surface-building.height)<.1;
-    }
-    if (tiles<4||!reachesRoof) invalid.push(building.key);
+    if (!building.hasLadder) continue;
+    ladderCount++;
+    let x=building.ladderCoord,y=building.ladderCoord;
+    if (building.ladderSide==="west") { x=building.minX-.3; y=building.ladderCoord; }
+    if (building.ladderSide==="east") { x=building.maxX+.3; y=building.ladderCoord; }
+    if (building.ladderSide==="north") { x=building.ladderCoord; y=building.minY-.3; }
+    if (building.ladderSide==="south") { x=building.ladderCoord; y=building.maxY+.3; }
+    const contact=ladderContactAt(x,y);
+    if (contact?.building.key!==building.key) invalid.push(building.key);
+    const wallTile=tileAt((building.minX+building.maxX)*.5,(building.minY+building.maxY)*.5);
+    if (!wallTile.hasLadder||!ladderStripe(wallTile,building.ladderSide,x,y,building.height*.5)) invalid.push(building.key);
+    if (!ladderSample) ladderSample={x,y,height:building.height,nx:contact?.nx,ny:contact?.ny};
   }
-  return {count,rampCount,invalid:[...new Set(invalid)],roofSample};
+  return {count,ladderCount,invalid:[...new Set(invalid)],roofSample,ladderSample};
 })()`,sandbox);
-if (!accessAudit.count||!accessAudit.rampCount||accessAudit.invalid.length) throw new Error(`Exterior ramp audit failed: ${JSON.stringify(accessAudit)}`);
+if (!accessAudit.count||!accessAudit.ladderCount||accessAudit.invalid.length) throw new Error(`Ladder audit failed: ${JSON.stringify(accessAudit)}`);
+sandbox.__ladderSample=accessAudit.ladderSample;
+const ladderMotionAudit=vm.runInContext(`(() => {
+  player.x=__ladderSample.x; player.y=__ladderSample.y; player.z=1; cameraMode="first";
+  player.angle=Math.atan2(__ladderSample.ny,__ladderSample.nx); keys.add("KeyW");
+  updateWalking(.1); const climbed=player.z; keys.delete("KeyW");
+  updateWalking(.1); return {climbed,lowered:player.z,onLadder:player.onLadder};
+})()`,sandbox);
+if (ladderMotionAudit.climbed<=1||ladderMotionAudit.lowered>=ladderMotionAudit.climbed||!ladderMotionAudit.onLadder) throw new Error(`Ladder motion audit failed: ${JSON.stringify(ladderMotionAudit)}`);
 sandbox.__roofSample=accessAudit.roofSample;
 const originRoofHit=vm.runInContext(`(() => {
   view.x=__roofSample.x; view.y=__roofSample.y; view.z=__roofSample.height+10;
@@ -71,6 +79,16 @@ if (!sprintStarted||!crouchAudit.crouching||crouchAudit.sprinting||crouchAudit.c
   throw new Error(`Movement input audit failed: ${JSON.stringify({sprintStarted,crouchAudit})}`);
 }
 
+const cameraModifierAudit=vm.runInContext(`(() => {
+  cameraMode="third"; orbitYaw=0; orbitPitch=0; keys.add("KeyC");
+  updateVehicleChaseCamera(1,-.2,.1); const held={yaw:orbitYaw,pitch:orbitPitch};
+  keys.delete("KeyC"); updateVehicleChaseCamera(1,-.2,.1);
+  return {held,released:{yaw:orbitYaw,pitch:orbitPitch}};
+})()`,sandbox);
+if (cameraModifierAudit.held.yaw!==0||cameraModifierAudit.held.pitch!==0||cameraModifierAudit.released.yaw<=0) {
+  throw new Error(`C free-look modifier audit failed: ${JSON.stringify(cameraModifierAudit)}`);
+}
+
 const aerialAudit=vm.runInContext(`(() => {
   cameraMode="first"; player.x=2.5; player.y=2.5; player.z=32; player.pitch=-Math.PI/2;
   renderWorld();
@@ -80,4 +98,4 @@ const aerialAudit=vm.runInContext(`(() => {
 })()`,sandbox);
 if (aerialAudit.invalidDepth||aerialAudit.painted<100) throw new Error(`Aerial render audit failed: ${JSON.stringify(aerialAudit)}`);
 
-console.log(`Smoke passed: ${accessAudit.count} buildings audited (${accessAudit.rampCount} exterior ramps); sprint/sneak verified; ${aerialAudit.painted} aerial cells rendered.`);
+console.log(`Smoke passed: ${accessAudit.count} buildings audited (${accessAudit.ladderCount} ladders); climb/release descent, sprint/sneak, and C free-look verified; ${aerialAudit.painted} aerial cells rendered.`);
