@@ -38,6 +38,7 @@ let fps = 60;
 const keys = new Set();
 
 const player = { x: 2.5, y: 2.5, z: 0, vz: 0, angle: 0, facing: 0, pitch: 0, onGround: true };
+const safePlayerPosition = { x: player.x, y: player.y, z: player.z };
 const car = { x: 8, y: 2.5, angle: 0, speed: 0, steer: 0, occupied: false };
 const helicopter = { x: 2.5, y: 5, z: .08, angle: Math.PI/2, speed: 0, vz: 0, occupied: false, rotorAngle: 0, rotorPower: 0 };
 const view = { x: player.x, y: player.y, z: 0, angle: player.angle, pitch: 0 };
@@ -193,9 +194,13 @@ function collides(x, y, radius = PLAYER_RADIUS) {
   return pts.some(([dx, dy]) => tileAt(x + dx, y + dy).solid);
 }
 
-function walkingSurfaceHeight(x,y) {
-  const tile=tileAt(x,y);
-  return tile.solid?tile.height:0;
+function walkingSurfaceHeight(x,y,radius=PLAYER_RADIUS) {
+  let surface=0;
+  for (const [dx,dy] of [[0,0],[-radius,-radius],[radius,-radius],[-radius,radius],[radius,radius]]) {
+    const tile=tileAt(x+dx,y+dy);
+    if (tile.solid) surface=Math.max(surface,tile.height);
+  }
+  return surface;
 }
 
 function walkingBlocked(x,y,feetZ,radius=PLAYER_RADIUS) {
@@ -204,6 +209,35 @@ function walkingBlocked(x,y,feetZ,radius=PLAYER_RADIUS) {
     const tile=tileAt(x+dx,y+dy);
     return tile.solid&&tile.height>feetZ+.32;
   });
+}
+
+function roofEdgeBlocked(x,y) {
+  const currentSurface=walkingSurfaceHeight(player.x,player.y);
+  if (currentSurface<=.1||player.z<currentSurface-.08||player.z>currentSurface+2.5) return false;
+  return walkingSurfaceHeight(x,y)<currentSurface-.35;
+}
+
+function recoverStuckPlayer() {
+  if (!walkingBlocked(player.x,player.y,player.z)) return false;
+  const tile=tileAt(player.x,player.y);
+  if (tile.solid&&player.z>=tile.height-1.15&&player.z<=tile.height+.35) {
+    player.z=tile.height; player.vz=0; player.onGround=true;
+    safePlayerPosition.x=player.x; safePlayerPosition.y=player.y; safePlayerPosition.z=player.z;
+    return true;
+  }
+  for (let radius=.2;radius<=5;radius+=.2) for (let step=0;step<24;step++) {
+    const angle=step*Math.PI/12;
+    const x=player.x+Math.cos(angle)*radius, y=player.y+Math.sin(angle)*radius;
+    const surface=walkingSurfaceHeight(x,y);
+    if (surface>player.z+.32||walkingBlocked(x,y,player.z)) continue;
+    player.x=x; player.y=y; player.vz=Math.min(0,player.vz);
+    return true;
+  }
+  if (!walkingBlocked(safePlayerPosition.x,safePlayerPosition.y,safePlayerPosition.z)) {
+    player.x=safePlayerPosition.x; player.y=safePlayerPosition.y; player.z=safePlayerPosition.z; player.vz=0; player.onGround=true;
+    return true;
+  }
+  return false;
 }
 
 function truckCollides(x, y, angle) {
@@ -738,7 +772,7 @@ function renderHelicopterCockpit() {
   // Artificial horizon and collective/cyclic controls.
   const gauge=[" .--------. ","|    +     |","|----------|","|    v     |"," '--------' "];
   gauge.forEach((line,gy)=>[...line].forEach((ch,gx)=>ch!==" "&&put(center+gx-6,dashY+4+gy,ch,ch==="-"?glass:"#ddb866")));
-  const collective=keys.has("Space")?"UP":keys.has("ControlLeft")||keys.has("ControlRight")?"DN":"HOLD";
+  const collective=keys.has("Space")?"UP":keys.has("ShiftLeft")||keys.has("ShiftRight")?"DN":"HOLD";
   const status=`COLLECTIVE ${collective}`;
   [...status].forEach((ch,i)=>put(left+12+i,rows-3,ch,instrument));
   const cyclic="  /|\\  ";
@@ -763,7 +797,7 @@ function renderHud() {
     put(mapX+mx, mapY+my+4, t.solid?"#":t.road?".":"·", t.solid?"#477b52":"#78bc85");
   }
   put(mapX, mapY+4, helicopter.occupied?"H":car.occupied?"V":"@", "#e6ff81");
-  const help = helicopter.occupied ? "W/S FLY  A/D YAW  SPACE RISE  CTRL DESCEND  E EXIT  V VIEW" : car.occupied ? "W/S THROTTLE  A/D STEER  SPACE BRAKE  E EXIT  V VIEW" : "WASD MOVE  SHIFT SPRINT  SPACE JUMP  E VEHICLE  V VIEW";
+  const help = helicopter.occupied ? "W/S FLY  A/D YAW  SPACE RISE  SHIFT DESCEND  CTRL+MOUSE FREE LOOK  E EXIT  V VIEW" : car.occupied ? "W/S THROTTLE  A/D STEER  SPACE BRAKE  CTRL+MOUSE FREE LOOK  E EXIT  V VIEW" : "WASD MOVE  SHIFT SPRINT  SPACE JUMP  E VEHICLE  V VIEW";
   [...help].forEach((ch,i)=>put(2+i, rows-2, ch, "#4d8158"));
 }
 
@@ -792,9 +826,9 @@ function paint() {
 
 function movePlayer(dx, dy) {
   const nx = player.x + dx;
-  if (!walkingBlocked(nx, player.y,player.z)) player.x = nx;
+  if (!roofEdgeBlocked(nx,player.y)&&!walkingBlocked(nx, player.y,player.z)) player.x = nx;
   const ny = player.y + dy;
-  if (!walkingBlocked(player.x, ny,player.z)) player.y = ny;
+  if (!roofEdgeBlocked(player.x,ny)&&!walkingBlocked(player.x, ny,player.z)) player.y = ny;
 }
 
 function update(dt) {
@@ -808,6 +842,10 @@ function update(dt) {
     const surface=walkingSurfaceHeight(player.x,player.y);
     if (player.z <= surface) { player.z = surface; player.vz = 0; player.onGround = true; }
     else player.onGround=false;
+    recoverStuckPlayer();
+    if (player.onGround&&!walkingBlocked(player.x,player.y,player.z)) {
+      safePlayerPosition.x=player.x; safePlayerPosition.y=player.y; safePlayerPosition.z=player.z;
+    }
     helicopter.rotorPower=Math.max(0,helicopter.rotorPower-dt*.16);
     helicopter.rotorAngle+=dt*(2+helicopter.rotorPower*24);
   }
@@ -831,6 +869,15 @@ function updateWalking(dt) {
   movePlayer(moveX*speed*dt, moveY*speed*dt);
 }
 
+function updateVehicleChaseCamera(vehicleAngle,defaultPitch,dt) {
+  if (cameraMode!=="third"||keys.has("ControlLeft")||keys.has("ControlRight")) return;
+  const yawBlend=1-Math.exp(-dt*3.2);
+  const pitchBlend=1-Math.exp(-dt*2.25);
+  const yawDelta=Math.atan2(Math.sin(vehicleAngle-orbitYaw),Math.cos(vehicleAngle-orbitYaw));
+  orbitYaw+=yawDelta*yawBlend;
+  orbitPitch+=(defaultPitch-orbitPitch)*pitchBlend;
+}
+
 function updateCar(dt) {
   const throttle = (keys.has("KeyW") ? 1 : 0) - (keys.has("KeyS") ? 1 : 0);
   car.speed += throttle * (car.speed * throttle < 0 ? 12 : 7) * dt;
@@ -845,6 +892,7 @@ function updateCar(dt) {
   if (!truckCollides(car.x + dx, car.y + dy, car.angle)) { car.x += dx; car.y += dy; }
   else car.speed *= -.18;
   player.x = car.x; player.y = car.y; player.facing = car.angle;
+  updateVehicleChaseCamera(car.angle,-.18,dt);
   if (cameraMode === "first") {
     player.angle += Math.atan2(Math.sin(car.angle-player.angle),Math.cos(car.angle-player.angle))*dt*7;
   }
@@ -865,7 +913,7 @@ function updateHelicopter(dt) {
     helicopter.x+=dx; helicopter.y+=dy;
   } else helicopter.speed*=.15;
 
-  const collective=(keys.has("Space")?1:0)-((keys.has("ControlLeft")||keys.has("ControlRight"))?1:0);
+  const collective=(keys.has("Space")?1:0)-((keys.has("ShiftLeft")||keys.has("ShiftRight"))?1:0);
   helicopter.vz+=collective*7.5*dt;
   helicopter.vz*=Math.pow(collective? .42:.18,dt);
   helicopter.vz=clamp(helicopter.vz,-5,5);
@@ -873,6 +921,7 @@ function updateHelicopter(dt) {
   const surface=helicopterSurfaceHeight(helicopter.x,helicopter.y);
   if (helicopter.z<=surface) { helicopter.z=surface; helicopter.vz=Math.max(0,helicopter.vz); }
   player.x=helicopter.x; player.y=helicopter.y; player.z=helicopter.z; player.facing=helicopter.angle;
+  updateVehicleChaseCamera(helicopter.angle,-.24,dt);
   if (cameraMode==="first") player.angle+=Math.atan2(Math.sin(helicopter.angle-player.angle),Math.cos(helicopter.angle-player.angle))*dt*4.5;
 }
 
@@ -886,6 +935,7 @@ function toggleVehicle() {
       const exitSurface=walkingSurfaceHeight(ex,ey);
       if (Math.abs(exitSurface-surface)<.35&&!walkingBlocked(ex,ey,exitSurface)) {
         player.x=ex; player.y=ey; player.z=exitSurface; player.vz=0; player.onGround=true;
+        safePlayerPosition.x=ex; safePlayerPosition.y=ey; safePlayerPosition.z=exitSurface;
         helicopter.occupied=false; helicopter.speed=0; return;
       }
     }
@@ -937,6 +987,7 @@ function assignNetworkSpawn(index) {
   const lane=index%3, row=Math.floor(index/3);
   const spawnX=1+lane*1.45, spawnY=2.5+row*12;
   player.x=spawnX; player.y=spawnY; player.z=0; player.vz=0;
+  safePlayerPosition.x=spawnX; safePlayerPosition.y=spawnY; safePlayerPosition.z=0;
   car.x=spawnX; car.y=spawnY+6; car.angle=Math.PI/2; car.speed=0;
   helicopter.x=spawnX; helicopter.y=spawnY+2.5; helicopter.z=.08; helicopter.angle=Math.PI/2;
 }
@@ -997,8 +1048,8 @@ addEventListener("keydown", e => {
   if (e.code === "KeyV" && !e.repeat) {
     cameraMode = cameraMode === "first" ? "third" : "first";
     if (cameraMode === "third") {
-      orbitYaw=player.angle;
-      orbitPitch=clamp(player.pitch,-.55,.22);
+      orbitYaw=helicopter.occupied?helicopter.angle:car.occupied?car.angle:player.angle;
+      orbitPitch=helicopter.occupied?-.24:car.occupied?-.18:clamp(player.pitch,-.55,.22);
     } else if (car.occupied||helicopter.occupied) {
       player.angle=car.angle;
       if (helicopter.occupied) player.angle=helicopter.angle;
@@ -1012,6 +1063,9 @@ addEventListener("keyup", e => keys.delete(e.code));
 addEventListener("mousemove", e => {
   if (document.pointerLockElement !== canvas || !running) return;
   if (cameraMode === "third") {
+    const occupied=car.occupied||helicopter.occupied;
+    const freeLook=keys.has("ControlLeft")||keys.has("ControlRight");
+    if (occupied&&!freeLook) return;
     orbitYaw += e.movementX * .0026;
     orbitPitch = clamp(orbitPitch - e.movementY * .0026, -2.4, .55);
   } else {

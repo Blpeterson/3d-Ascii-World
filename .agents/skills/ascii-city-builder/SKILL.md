@@ -21,7 +21,7 @@ Preserve the game's core identity: the visible world is a character-cell buffer 
 - Keep neighborhood bands deterministic and at least three city blocks wide. Low-rise, mixed, and skyscraper districts should alter height distributions without breaking the global 4.4-unit minimum.
 - Keep generated building height at or above `4.4` world units unless the user explicitly changes the scale contract.
 - Keep collision and rendering driven by the same `tileAt` result; visual geometry must not become passable, or invisible geometry solid.
-- Treat a solid tile's generated height as a valid walking floor when the player is on its roof. Roof exits, jumps, edges, and falls must use that same height rather than assuming ground altitude zero.
+- Treat a solid tile's generated height as a valid walking floor when the player is on its roof. Sample support across the player's footprint, guard roof edges, and run stuck recovery before a partially embedded player can become immobilized.
 - Camera features should read from `view`; gameplay physics should read and write `player` or `car`.
 - Maintain both first- and third-person behavior when adding movement, vehicles, or camera effects.
 - The truck and helicopter are separate world-space vehicles. Helicopter landing height must come from `tileAt`, animated rotors remain cuboid geometry, and its first-person cockpit uses helicopter-specific instruments.
@@ -29,6 +29,7 @@ Preserve the game's core identity: the visible world is a character-cell buffer 
 - Multiplayer remains dependency-free through `server.mjs`, binds to the LAN, assigns each connection a personal truck/helicopter spawn and color style, and renders every remote person's model in both local camera modes, including a seated model while occupied.
 - Third-person cameras remain centered on the character head or occupied vehicle target. Keep orbit yaw/pitch separate from actor heading. Use a bounded game-style boom: yaw circles the target, pitch changes camera height without collapsing horizontal distance, and 3D collision is the only reason to shorten the boom.
 - Allow the third-person boom to rise into a high overhead view while retaining its target lock and collision shortening.
+- Occupied truck/helicopter third-person cameras smoothly trail vehicle heading and ease toward their chase pitch. Only let mouse movement free-orbit an occupied vehicle while `Ctrl` is held; releasing it must flow back behind. Helicopter descent uses `Shift`, leaving `Ctrl` exclusively for vehicle free-look.
 - Project vertical world positions through `projectWorldHeight`; do not simulate camera pitch by shifting the horizon or screen-space models.
 - Keep the camera rectilinear: space columns evenly across the camera plane, derive yaw offsets with `atan`, and derive vertical focal length from horizontal FOV plus character-cell aspect ratio. Even angular spacing produces cylindrical bowing on nearby buildings.
 - Preserve tower presence near a straight-up first-person view with the smooth upward-only vertical-FOV expansion. Recompute row ray scales from the active focal length each frame so walls, ground, roofs, and facade sampling remain aligned.

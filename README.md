@@ -28,7 +28,8 @@ Multiplayer uses the Node launcher's built-in WebSocket relay and does not requi
 - **Mouse** — natural vertical look with an expanded up/down range
 - **Shift** — sprint
 - **Space** — jump / handbrake / helicopter collective up
-- **Ctrl** — helicopter collective down
+- **Shift** — helicopter collective down
+- **Ctrl + Mouse** — temporarily free-orbit the third-person truck/helicopter camera
 - **E** — enter or exit the truck or helicopter
 - **Escape** — release the mouse and pause
 
@@ -37,3 +38,5 @@ The world is coordinate-seeded rather than stored, so it has no fixed edge and r
 Every connected player receives a nearby personal truck and helicopter. Players, shirts, pants, shoes, trucks, and helicopters use a consistent per-player color style and are visible from either camera mode.
 
 Driving in first-person includes a windshield frame, live rear-view mirror, instruments, hood, and a steering wheel that follows the front-wheel input. The helicopter has a separate cockpit, rotor/altitude/heading instruments, animated world-space rotors, and can land on generated rooftops. Land fully, press **E** to step onto the roof, then walk, jump, and carefully approach roof edges. The city is grouped into deterministic multi-block low-rise, mixed, and skyscraper districts.
+
+In third person, occupied vehicles use a smooth trailing chase camera. Hold **Ctrl** while moving the mouse for free orbit; release it to flow back behind the vehicle. Rooftop walking uses footprint support, edge protection, and automatic stuck recovery.
