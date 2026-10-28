@@ -44,6 +44,22 @@ const view = { x: player.x, y: player.y, z: 0, angle: player.angle, pitch: 0 };
 let cameraMode = "first";
 let orbitYaw = 0;
 let orbitPitch = .08;
+const peers=new Map();
+let multiplayerSocket=null;
+let multiplayerStatus="CONNECTING";
+let localPeerId=null;
+let localStyle=0;
+let spawnAssigned=false;
+let lastNetworkSend=0;
+
+const playerStyles=[
+  { shirt:"#66dc80",shirtDark:"#4eaf64",pants:"#3f9254",shoe:"#b8f7c4",skin:"#c8ffd5",truck:"#56c96f",truckDark:"#489d5b",heli:"#e7b95b",heliDark:"#bd8b39" },
+  { shirt:"#66aee8",shirtDark:"#407cae",pants:"#334d86",shoe:"#c2dcff",skin:"#ffe0bd",truck:"#559fe4",truckDark:"#3971a8",heli:"#ef765f",heliDark:"#ad4b3d" },
+  { shirt:"#d37ae8",shirtDark:"#9a50af",pants:"#643b86",shoe:"#f1c8ff",skin:"#d8a980",truck:"#bc6cda",truckDark:"#82469d",heli:"#70c8d5",heliDark:"#3d8995" },
+  { shirt:"#e6a958",shirtDark:"#a87135",pants:"#75562f",shoe:"#ffe0a3",skin:"#f2c39f",truck:"#db8f3f",truckDark:"#985e2a",heli:"#82d56a",heliDark:"#4c9840" },
+  { shirt:"#e96f91",shirtDark:"#aa4765",pants:"#71384a",shoe:"#ffd0dc",skin:"#8f654f",truck:"#da547b",truckDark:"#983a55",heli:"#9c8ce8",heliDark:"#6657ad" },
+  { shirt:"#70d9cc",shirtDark:"#43998f",pants:"#315f62",shoe:"#bdfff6",skin:"#efc7a6",truck:"#46b9ad",truckDark:"#2e8078",heli:"#e6cf59",heliDark:"#a49334" }
+];
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const fract = v => v - Math.floor(v);
@@ -175,6 +191,19 @@ function tileAt(x, y) {
 function collides(x, y, radius = PLAYER_RADIUS) {
   const pts = [[-radius,-radius],[radius,-radius],[-radius,radius],[radius,radius]];
   return pts.some(([dx, dy]) => tileAt(x + dx, y + dy).solid);
+}
+
+function walkingSurfaceHeight(x,y) {
+  const tile=tileAt(x,y);
+  return tile.solid?tile.height:0;
+}
+
+function walkingBlocked(x,y,feetZ,radius=PLAYER_RADIUS) {
+  const pts=[[-radius,-radius],[radius,-radius],[-radius,radius],[radius,radius]];
+  return pts.some(([dx,dy]) => {
+    const tile=tileAt(x+dx,y+dy);
+    return tile.solid&&tile.height>feetZ+.32;
+  });
 }
 
 function truckCollides(x, y, angle) {
@@ -456,14 +485,14 @@ function updateView() {
   if (cameraMode === "first") {
     view.x=player.x;
     view.y=player.y;
-    view.z=helicopter.occupied?helicopter.z+1.18:car.occupied?1.08:player.z+1.65;
+    view.z=helicopter.occupied?helicopter.z+1.18:car.occupied?1.08:player.z+1.48;
     view.angle=player.angle;
     view.pitch=player.pitch;
     return;
   }
 
   const targetX=player.x, targetY=player.y;
-  const targetZ=helicopter.occupied?helicopter.z+1.05:car.occupied?1.08:player.z+1.73;
+  const targetZ=helicopter.occupied?helicopter.z+1.05:car.occupied?1.08:player.z+1.55;
   const followDistance=helicopter.occupied?13:car.occupied?11.5:8.5;
   const pitch=clamp(orbitPitch,-2.4,.55);
   const minimumDistance=helicopter.occupied?2.3:car.occupied?1.8:.6;
@@ -497,13 +526,14 @@ function offsetBox(baseX, baseY, angle, forward, side, spec) {
   };
 }
 
-function truckBoxes() {
-  const a = car.angle, x = car.x, y = car.y;
-  const body = { color: "#56c96f", chars: ["@", "%"] };
+function truckBoxes(source=car,styleIndex=localStyle) {
+  const a = source.angle, x = source.x, y = source.y;
+  const style=playerStyles[styleIndex%playerStyles.length];
+  const body = { color: style.truck, chars: ["@", "%"] };
   return [
     offsetBox(x,y,a, 0,0, { length:3.25,width:1.42,z0:.28,z1:1.02,...body }),
-    offsetBox(x,y,a,-.78,0, { length:1.42,width:1.34,z0:.78,z1:1.42,color:"#489d5b",chars:["#","%"] }),
-    offsetBox(x,y,a, .67,0, { length:1.2,width:1.32,z0:.77,z1:1.73,color:"#70e78a",chars:["@","#"] }),
+    offsetBox(x,y,a,-.78,0, { length:1.42,width:1.34,z0:.78,z1:1.42,color:style.truckDark,chars:["#","%"] }),
+    offsetBox(x,y,a, .67,0, { length:1.2,width:1.32,z0:.77,z1:1.73,color:style.truck,chars:["@","#"] }),
     offsetBox(x,y,a, .69,0, { length:1.22,width:1.35,z0:1.22,z1:1.61,color:"#b9ffd0",chars:["=","+"] }),
     offsetBox(x,y,a, 1.47,0, { length:.32,width:1.38,z0:.4,z1:.82,color:"#78dd8c",chars:["%","#"] }),
     offsetBox(x,y,a,-1.48,0, { length:.22,width:1.48,z0:.34,z1:.62,color:"#8cf0a0",chars:["=","-"] }),
@@ -513,42 +543,51 @@ function truckBoxes() {
   ];
 }
 
-function helicopterBoxes() {
-  const a=helicopter.angle, x=helicopter.x, y=helicopter.y, z=helicopter.z;
-  const body={ color:"#e7b95b", chars:["@","#"] };
-  const rotorA=a+helicopter.rotorAngle;
+function helicopterBoxes(source=helicopter,styleIndex=localStyle) {
+  const a=source.angle, x=source.x, y=source.y, z=source.z;
+  const style=playerStyles[styleIndex%playerStyles.length];
+  const body={ color:style.heli, chars:["@","#"] };
+  const rotorA=a+source.rotorAngle;
   const tailX=x-Math.cos(a)*2.45, tailY=y-Math.sin(a)*2.45;
+  const tailHorizontal=.1+Math.abs(Math.cos(source.rotorAngle))*1.3;
+  const tailVertical=.06+Math.abs(Math.sin(source.rotorAngle))*.68;
+  const tailCenter=z+1.15;
   return [
     offsetBox(x,y,a,.15,0,{length:2.65,width:1.45,z0:z+.32,z1:z+1.38,...body}),
     offsetBox(x,y,a,.83,0,{length:1.05,width:1.34,z0:z+.73,z1:z+1.58,color:"#b9edf0",chars:["=","+"]}),
-    offsetBox(x,y,a,-1.75,0,{length:2.45,width:.36,z0:z+.72,z1:z+1.08,color:"#bd8b39",chars:["#","+"]}),
-    offsetBox(x,y,a,-2.82,0,{length:.25,width:1.15,z0:z+.72,z1:z+1.62,color:"#d9a84d",chars:["%","#"]}),
+    offsetBox(x,y,a,-1.75,0,{length:2.45,width:.36,z0:z+.72,z1:z+1.08,color:style.heliDark,chars:["#","+"]}),
+    offsetBox(x,y,a,-2.82,0,{length:.25,width:1.15,z0:z+.72,z1:z+1.62,color:style.heli,chars:["%","#"]}),
     offsetBox(x,y,a,0,-.72,{length:2.2,width:.12,z0:z+.06,z1:z+.18,color:"#d7d1a5",chars:["=","-"]}),
     offsetBox(x,y,a,0,.72,{length:2.2,width:.12,z0:z+.06,z1:z+.18,color:"#d7d1a5",chars:["=","-"]}),
     offsetBox(x,y,a,-.45,-.72,{length:.12,width:.12,z0:z+.12,z1:z+.55,color:"#a9935d",chars:["|","|"]}),
     offsetBox(x,y,a,-.45,.72,{length:.12,width:.12,z0:z+.12,z1:z+.55,color:"#a9935d",chars:["|","|"]}),
     offsetBox(x,y,rotorA,0,0,{length:6.7,width:.1,z0:z+1.68,z1:z+1.76,color:"#efffc9",chars:["=","-"]}),
     offsetBox(x,y,rotorA+Math.PI/2,0,0,{length:6.7,width:.1,z0:z+1.67,z1:z+1.75,color:"#d7e8b6",chars:["=","-"]}),
-    offsetBox(tailX,tailY,a+Math.PI/2,0,0,{length:1.5,width:.08,z0:z+.55,z1:z+1.75,color:"#f6d279",chars:["+","|"]}),
-    offsetBox(tailX,tailY,a+Math.PI/2+helicopter.rotorAngle,0,0,{length:.12,width:1.3,z0:z+.72,z1:z+1.55,color:"#f6d279",chars:["+","|"]})
+    offsetBox(tailX,tailY,a+Math.PI/2,0,0,{length:tailHorizontal,width:.08,z0:tailCenter-.045,z1:tailCenter+.045,color:"#f6d279",chars:["+","-"]}),
+    offsetBox(tailX,tailY,a+Math.PI/2,0,0,{length:.09,width:.09,z0:tailCenter-tailVertical,z1:tailCenter+tailVertical,color:"#f6d279",chars:["|","|"]})
   ];
 }
 
-function personBoxes() {
-  const a = player.facing;
-  const moving = keys.has("KeyW") || keys.has("KeyS") || keys.has("KeyA") || keys.has("KeyD");
+function personBoxes(source=player,local=true,scale=.8,styleIndex=localStyle) {
+  const style=playerStyles[styleIndex%playerStyles.length];
+  const a = source.facing;
+  const moving = local&&(keys.has("KeyW") || keys.has("KeyS") || keys.has("KeyA") || keys.has("KeyD"));
   const phase = moving ? Math.sin(performance.now() * .012) : 0;
-  const x = player.x, y = player.y, lift = player.z;
+  const x = source.x, y = source.y, lift = source.z;
+  const box=(forward,side,spec)=>offsetBox(x,y,a,forward*scale,side*scale,{
+    ...spec,length:spec.length*scale,width:spec.width*scale,
+    z0:lift+(spec.z0-lift)*scale,z1:lift+(spec.z1-lift)*scale
+  });
   return [
-    offsetBox(x,y,a,0,0,{ length:.52,width:.58,z0:1.45+lift,z1:2.02+lift,color:"#c8ffd5",chars:["@","%"] }),
-    offsetBox(x,y,a,0,0,{ length:.38,width:.68,z0:.78+lift,z1:1.47+lift,color:"#66dc80",chars:["%","#"] }),
-    offsetBox(x,y,a,0,0,{ length:.4,width:.56,z0:.62+lift,z1:.84+lift,color:"#4eaf64",chars:["#","*"] }),
-    offsetBox(x,y,a,.03,-.43,{ length:.28,width:.18,z0:.68+lift,z1:1.4+lift,color:"#7be391",chars:["%","#"] }),
-    offsetBox(x,y,a,.03,.43,{ length:.28,width:.18,z0:.68+lift,z1:1.4+lift,color:"#7be391",chars:["%","#"] }),
-    offsetBox(x,y,a,phase*.13,-.18,{ length:.3,width:.22,z0:.08+lift,z1:.68+lift,color:"#3f9254",chars:["#","*"] }),
-    offsetBox(x,y,a,-phase*.13,.18,{ length:.3,width:.22,z0:.08+lift,z1:.68+lift,color:"#3f9254",chars:["#","*"] }),
-    offsetBox(x,y,a,.13+phase*.13,-.18,{ length:.48,width:.27,z0:.02+lift,z1:.18+lift,color:"#b8f7c4",chars:["=","-"] }),
-    offsetBox(x,y,a,.13-phase*.13,.18,{ length:.48,width:.27,z0:.02+lift,z1:.18+lift,color:"#b8f7c4",chars:["=","-"] })
+    box(0,0,{ length:.52,width:.58,z0:1.45+lift,z1:2.02+lift,color:style.skin,chars:["@","%"] }),
+    box(0,0,{ length:.38,width:.68,z0:.78+lift,z1:1.47+lift,color:style.shirt,chars:["%","#"] }),
+    box(0,0,{ length:.4,width:.56,z0:.62+lift,z1:.84+lift,color:style.shirtDark,chars:["#","*"] }),
+    box(.03,-.43,{ length:.28,width:.18,z0:.68+lift,z1:1.4+lift,color:style.shirt,chars:["%","#"] }),
+    box(.03,.43,{ length:.28,width:.18,z0:.68+lift,z1:1.4+lift,color:style.shirt,chars:["%","#"] }),
+    box(phase*.13,-.18,{ length:.3,width:.22,z0:.08+lift,z1:.68+lift,color:style.pants,chars:["#","*"] }),
+    box(-phase*.13,.18,{ length:.3,width:.22,z0:.08+lift,z1:.68+lift,color:style.pants,chars:["#","*"] }),
+    box(.13+phase*.13,-.18,{ length:.48,width:.27,z0:.02+lift,z1:.18+lift,color:style.shoe,chars:["=","-"] }),
+    box(.13-phase*.13,.18,{ length:.48,width:.27,z0:.02+lift,z1:.18+lift,color:style.shoe,chars:["=","-"] })
   ];
 }
 
@@ -572,9 +611,25 @@ function rayOrientedBox(originX, originY, dirX, dirY, box) {
 
 function renderDynamicModels() {
   const boxes = [];
-  if (!car.occupied || cameraMode === "third") boxes.push(...truckBoxes());
-  if (!helicopter.occupied || cameraMode === "third") boxes.push(...helicopterBoxes());
-  if (!car.occupied && !helicopter.occupied && cameraMode === "third") boxes.push(...personBoxes());
+  if (!car.occupied || cameraMode === "third") boxes.push(...truckBoxes(car,localStyle));
+  if (!helicopter.occupied || cameraMode === "third") boxes.push(...helicopterBoxes(helicopter,localStyle));
+  if (!car.occupied && !helicopter.occupied && cameraMode === "third") boxes.push(...personBoxes(player,true,.8,localStyle));
+  for (const peer of peers.values()) {
+    boxes.push(...truckBoxes(peer.car,peer.style));
+    boxes.push(...helicopterBoxes(peer.helicopter,peer.style));
+    let avatar={...peer.player};
+    let scale=.8;
+    if (peer.helicopter.occupied) {
+      avatar={x:peer.helicopter.x+Math.cos(peer.helicopter.angle)*.25,y:peer.helicopter.y+Math.sin(peer.helicopter.angle)*.25,z:peer.helicopter.z+.45,facing:peer.helicopter.angle};
+      scale=.56;
+    } else if (peer.car.occupied) {
+      avatar={x:peer.car.x+Math.cos(peer.car.angle)*.38,y:peer.car.y+Math.sin(peer.car.angle)*.38,z:.48,facing:peer.car.angle};
+      scale=.56;
+    }
+    // Remote people are deliberately present in both local camera modes,
+    // including when seated in one of their synchronized vehicles.
+    boxes.push(...personBoxes(avatar,false,scale,peer.style));
+  }
   if (!boxes.length) return;
 
   for (let x=0; x<cols; x++) {
@@ -696,7 +751,8 @@ function renderHud() {
   const speed = helicopter.occupied ? `  ${String(Math.round(Math.abs(helicopter.speed) * 18)).padStart(3,"0")} KM/H` : car.occupied ? `  ${String(Math.round(Math.abs(car.speed) * 18)).padStart(3,"0")} KM/H` : "";
   const zoneX = Math.floor(player.x / BLOCK), zoneY = Math.floor(player.y / BLOCK);
   const neighborhood=neighborhoodAt(zoneX,zoneY);
-  const top = ` ENDLESS//CITY   ${mode}  ${camera}${speed} `;
+  const online=multiplayerStatus==="ONLINE"?`ONLINE ${peers.size+1}`:multiplayerStatus;
+  const top = ` ENDLESS//CITY   ${mode}  ${camera}${speed}  ${online} `;
   [...top].forEach((ch, i) => put(2+i, 1, ch, "#8aff9f"));
   const pos = ` ${neighborhood.type} DISTRICT  BLOCK ${zoneX >= 0 ? "+" : ""}${zoneX}:${zoneY >= 0 ? "+" : ""}${zoneY}  ALT ${player.z.toFixed(1)} `;
   [...pos].forEach((ch, i) => put(2+i, 2, ch, "#579b65"));
@@ -736,9 +792,9 @@ function paint() {
 
 function movePlayer(dx, dy) {
   const nx = player.x + dx;
-  if (!collides(nx, player.y)) player.x = nx;
+  if (!walkingBlocked(nx, player.y,player.z)) player.x = nx;
   const ny = player.y + dy;
-  if (!collides(player.x, ny)) player.y = ny;
+  if (!walkingBlocked(player.x, ny,player.z)) player.y = ny;
 }
 
 function update(dt) {
@@ -749,7 +805,9 @@ function update(dt) {
     updateWalking(dt);
     player.vz -= 12 * dt;
     player.z += player.vz * dt;
-    if (player.z <= 0) { player.z = 0; player.vz = 0; player.onGround = true; }
+    const surface=walkingSurfaceHeight(player.x,player.y);
+    if (player.z <= surface) { player.z = surface; player.vz = 0; player.onGround = true; }
+    else player.onGround=false;
     helicopter.rotorPower=Math.max(0,helicopter.rotorPower-dt*.16);
     helicopter.rotorAngle+=dt*(2+helicopter.rotorPower*24);
   }
@@ -821,12 +879,13 @@ function updateHelicopter(dt) {
 function toggleVehicle() {
   if (helicopter.occupied) {
     const surface=helicopterSurfaceHeight(helicopter.x,helicopter.y)-.08;
-    if (helicopter.z>surface+.16||surface>.1) return;
-    for (const a of [Math.PI/2,-Math.PI/2,Math.PI]) {
-      const ex=helicopter.x+Math.cos(helicopter.angle+a)*1.45;
-      const ey=helicopter.y+Math.sin(helicopter.angle+a)*1.45;
-      if (!collides(ex,ey)) {
-        player.x=ex; player.y=ey; player.z=0; player.vz=0;
+    if (helicopter.z>surface+.16) return;
+    for (const [a,d] of [[Math.PI/2,1.45],[-Math.PI/2,1.45],[Math.PI,1.65],[0,1.65],[0,0]]) {
+      const ex=helicopter.x+Math.cos(helicopter.angle+a)*d;
+      const ey=helicopter.y+Math.sin(helicopter.angle+a)*d;
+      const exitSurface=walkingSurfaceHeight(ex,ey);
+      if (Math.abs(exitSurface-surface)<.35&&!walkingBlocked(ex,ey,exitSurface)) {
+        player.x=ex; player.y=ey; player.z=exitSurface; player.vz=0; player.onGround=true;
         helicopter.occupied=false; helicopter.speed=0; return;
       }
     }
@@ -845,10 +904,86 @@ function toggleVehicle() {
   }
 }
 
+function networkNumber(value,fallback,min=-10000,max=10000) {
+  const number=Number(value);
+  return Number.isFinite(number)?clamp(number,min,max):fallback;
+}
+
+function acceptPeerState(id,state) {
+  if (!id||id===localPeerId||!state) return;
+  const old=peers.get(id);
+  peers.set(id,{
+    style:Math.floor(networkNumber(state.style,old?.style||0,0,playerStyles.length-1)),
+    player:{
+      x:networkNumber(state.player?.x,old?.player.x||0),y:networkNumber(state.player?.y,old?.player.y||0),
+      z:networkNumber(state.player?.z,old?.player.z||0,0,80),facing:networkNumber(state.player?.facing,old?.player.facing||0,-1000,1000)
+    },
+    car:{
+      x:networkNumber(state.car?.x,old?.car.x||0),y:networkNumber(state.car?.y,old?.car.y||0),
+      angle:networkNumber(state.car?.angle,old?.car.angle||0,-1000,1000),occupied:Boolean(state.car?.occupied)
+    },
+    helicopter:{
+      x:networkNumber(state.helicopter?.x,old?.helicopter.x||0),y:networkNumber(state.helicopter?.y,old?.helicopter.y||0),
+      z:networkNumber(state.helicopter?.z,old?.helicopter.z||.08,0,80),angle:networkNumber(state.helicopter?.angle,old?.helicopter.angle||0,-1000,1000),
+      rotorAngle:networkNumber(state.helicopter?.rotorAngle,old?.helicopter.rotorAngle||0,-100000,100000),occupied:Boolean(state.helicopter?.occupied)
+    }
+  });
+}
+
+function assignNetworkSpawn(index) {
+  if (spawnAssigned) return;
+  spawnAssigned=true;
+  localStyle=index%playerStyles.length;
+  const lane=index%3, row=Math.floor(index/3);
+  const spawnX=1+lane*1.45, spawnY=2.5+row*12;
+  player.x=spawnX; player.y=spawnY; player.z=0; player.vz=0;
+  car.x=spawnX; car.y=spawnY+6; car.angle=Math.PI/2; car.speed=0;
+  helicopter.x=spawnX; helicopter.y=spawnY+2.5; helicopter.z=.08; helicopter.angle=Math.PI/2;
+}
+
+function localNetworkState() {
+  return {
+    style:localStyle,
+    player:{x:player.x,y:player.y,z:player.z,facing:player.facing},
+    car:{x:car.x,y:car.y,angle:car.angle,occupied:car.occupied},
+    helicopter:{x:helicopter.x,y:helicopter.y,z:helicopter.z,angle:helicopter.angle,rotorAngle:helicopter.rotorAngle,occupied:helicopter.occupied}
+  };
+}
+
+function connectMultiplayer() {
+  if (!window.WebSocket||multiplayerSocket?.readyState===WebSocket.OPEN||multiplayerSocket?.readyState===WebSocket.CONNECTING) return;
+  multiplayerStatus="CONNECTING";
+  const protocol=location.protocol==="https:"?"wss:":"ws:";
+  multiplayerSocket=new WebSocket(`${protocol}//${location.host}/ws`);
+  multiplayerSocket.addEventListener("open",()=>{ multiplayerStatus="ONLINE"; });
+  multiplayerSocket.addEventListener("message",event=>{
+    try {
+      const message=JSON.parse(event.data);
+      if (message.type==="welcome") {
+        localPeerId=message.id; assignNetworkSpawn(Math.max(0,Math.floor(message.spawnIndex||0)));
+        for (const peer of message.peers||[]) acceptPeerState(peer.id,peer.state);
+      } else if (message.type==="state") acceptPeerState(message.id,message.state);
+      else if (message.type==="leave") peers.delete(message.id);
+    } catch { /* Ignore malformed network messages. */ }
+  });
+  multiplayerSocket.addEventListener("close",()=>{
+    multiplayerStatus="OFFLINE"; peers.clear(); multiplayerSocket=null;
+    setTimeout(connectMultiplayer,2000);
+  });
+  multiplayerSocket.addEventListener("error",()=>{ multiplayerStatus="OFFLINE"; });
+}
+
+function sendNetworkState(now) {
+  if (!multiplayerSocket||multiplayerSocket.readyState!==WebSocket.OPEN||now-lastNetworkSend<80) return;
+  lastNetworkSend=now;
+  multiplayerSocket.send(JSON.stringify({type:"state",state:localNetworkState()}));
+}
+
 function loop(now) {
   const dt = (now-lastTime)/1000; lastTime=now;
   fps = fps*.9 + (1/Math.max(.001,dt))*.1;
   if (running) update(dt);
+  sendNetworkState(now);
   renderWorld();
   requestAnimationFrame(loop);
 }
@@ -893,4 +1028,5 @@ document.addEventListener("pointerlockchange", () => {
 });
 
 resize();
+connectMultiplayer();
 requestAnimationFrame(loop);

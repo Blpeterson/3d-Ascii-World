@@ -21,9 +21,12 @@ Preserve the game's core identity: the visible world is a character-cell buffer 
 - Keep neighborhood bands deterministic and at least three city blocks wide. Low-rise, mixed, and skyscraper districts should alter height distributions without breaking the global 4.4-unit minimum.
 - Keep generated building height at or above `4.4` world units unless the user explicitly changes the scale contract.
 - Keep collision and rendering driven by the same `tileAt` result; visual geometry must not become passable, or invisible geometry solid.
+- Treat a solid tile's generated height as a valid walking floor when the player is on its roof. Roof exits, jumps, edges, and falls must use that same height rather than assuming ground altitude zero.
 - Camera features should read from `view`; gameplay physics should read and write `player` or `car`.
 - Maintain both first- and third-person behavior when adding movement, vehicles, or camera effects.
 - The truck and helicopter are separate world-space vehicles. Helicopter landing height must come from `tileAt`, animated rotors remain cuboid geometry, and its first-person cockpit uses helicopter-specific instruments.
+- Keep the tail rotor visually in its vertical plane; do not represent it with a rotating horizontal square prism.
+- Multiplayer remains dependency-free through `server.mjs`, binds to the LAN, assigns each connection a personal truck/helicopter spawn and color style, and renders every remote person's model in both local camera modes, including a seated model while occupied.
 - Third-person cameras remain centered on the character head or occupied vehicle target. Keep orbit yaw/pitch separate from actor heading. Use a bounded game-style boom: yaw circles the target, pitch changes camera height without collapsing horizontal distance, and 3D collision is the only reason to shorten the boom.
 - Allow the third-person boom to rise into a high overhead view while retaining its target lock and collision shortening.
 - Project vertical world positions through `projectWorldHeight`; do not simulate camera pitch by shifting the horizon or screen-space models.
@@ -47,3 +50,5 @@ powershell -ExecutionPolicy Bypass -File tools/validate.ps1
 For visual or control changes, launch the game and verify pointer lock, both cameras, walking, jumping, car entry/exit, collision, and driving. Treat the validator as a fast gate, not a replacement for play-testing.
 
 If a local test server is started, stop it before finishing the task and verify that its process or listener has ended.
+
+At the end of every run that edits the project, provide a new detailed Git commit message covering the implemented behavior and the validation performed. Do not reuse a stale message from an earlier run.

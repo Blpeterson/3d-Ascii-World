@@ -16,7 +16,9 @@ Or, if Python is installed:
 python server.py
 ```
 
-Then open <http://127.0.0.1:8000> if it does not open automatically.
+Then open <http://127.0.0.1:8000>. The Node launcher also prints one or more LAN URLs. Anyone on the same network can join by opening that `http://YOUR-IP:8000` address in a browser. Windows may ask you to allow Node.js through the private-network firewall.
+
+Multiplayer uses the Node launcher's built-in WebSocket relay and does not require packages. The Python launcher remains a single-player static fallback.
 
 ## Controls
 
@@ -32,4 +34,6 @@ Then open <http://127.0.0.1:8000> if it does not open automatically.
 
 The world is coordinate-seeded rather than stored, so it has no fixed edge and revisiting a block reconstructs the same buildings.
 
-Driving in first-person includes a windshield frame, live rear-view mirror, instruments, hood, and a steering wheel that follows the front-wheel input. The helicopter has a separate cockpit, rotor/altitude/heading instruments, animated world-space rotors, and can land on generated rooftops. The city is grouped into deterministic multi-block low-rise, mixed, and skyscraper districts.
+Every connected player receives a nearby personal truck and helicopter. Players, shirts, pants, shoes, trucks, and helicopters use a consistent per-player color style and are visible from either camera mode.
+
+Driving in first-person includes a windshield frame, live rear-view mirror, instruments, hood, and a steering wheel that follows the front-wheel input. The helicopter has a separate cockpit, rotor/altitude/heading instruments, animated world-space rotors, and can land on generated rooftops. Land fully, press **E** to step onto the roof, then walk, jump, and carefully approach roof edges. The city is grouped into deterministic multi-block low-rise, mixed, and skyscraper districts.
