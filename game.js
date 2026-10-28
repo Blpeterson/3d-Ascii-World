@@ -8,12 +8,12 @@ const hint = document.querySelector("#hint");
 
 const CELL_W = 8;
 const CELL_H = 13;
-const FOV = Math.PI / 2.5;
+const HORIZONTAL_FOV = Math.PI / 2.5;
 const VIEW_DISTANCE = 58;
 const BLOCK = 18;
 const ROAD = 5;
 const PLAYER_RADIUS = 0.28;
-const LOOK_LIMIT = Math.PI / 2 - .006;
+const LOOK_LIMIT = Math.PI / 2;
 
 let cols = 120;
 let rows = 50;
@@ -29,6 +29,8 @@ let screenYScales = [];
 let rayAngles = [];
 let rayCosines = [];
 let raySines = [];
+let projectionFocalRows = 45;
+let baseProjectionFocalRows = 45;
 const tileCache = new Map();
 let running = false;
 let lastTime = performance.now();
@@ -37,6 +39,7 @@ const keys = new Set();
 
 const player = { x: 2.5, y: 2.5, z: 0, vz: 0, angle: 0, facing: 0, pitch: 0, onGround: true };
 const car = { x: 8, y: 2.5, angle: 0, speed: 0, steer: 0, occupied: false };
+const helicopter = { x: 2.5, y: 5, z: .08, angle: Math.PI/2, speed: 0, vz: 0, occupied: false, rotorAngle: 0, rotorPower: 0 };
 const view = { x: player.x, y: player.y, z: 0, angle: player.angle, pitch: 0 };
 let cameraMode = "first";
 let orbitYaw = 0;
@@ -68,17 +71,46 @@ function resize() {
   rayAngles = new Float64Array(cols);
   rayCosines = new Float64Array(cols);
   raySines = new Float64Array(cols);
+  // A rectilinear pinhole projection spaces screen columns evenly on the
+  // camera plane, not evenly by angle. This keeps straight building edges
+  // straight instead of bowing them into a cylindrical/fisheye curve.
+  const horizontalFocalCols=(cols*.5)/Math.tan(HORIZONTAL_FOV*.5);
+  baseProjectionFocalRows=horizontalFocalCols*(CELL_W/CELL_H);
+  projectionFocalRows=baseProjectionFocalRows;
+  const maxScreenX=Math.tan(HORIZONTAL_FOV*.5);
   for (let x=0;x<cols;x++) {
-    screenYawOffsets[x]=-FOV/2+(x/cols)*FOV;
-    screenXScales[x]=Math.tan(screenYawOffsets[x]);
+    screenXScales[x]=((x+.5)/cols*2-1)*maxScreenX;
+    screenYawOffsets[x]=Math.atan(screenXScales[x]);
   }
   for (let y=0;y<rows;y++) {
-    screenYScales[y]=(rows*.5-y)/(rows*.9);
+    screenYScales[y]=(rows*.5-(y+.5))/projectionFocalRows;
     screenPitchOffsets[y]=Math.atan(screenYScales[y]);
   }
 }
 
 function floorMod(n, d) { return ((n % d) + d) % d; }
+
+// Each 18-block strip is deterministically split into four neighborhoods.
+// Distributing six extra blocks over four 3-block bases produces districts
+// that are always at least 3x3 blocks and vary naturally in size.
+function neighborhoodBand(block, salt) {
+  const chunk=Math.floor(block/18), local=floorMod(block,18);
+  const sizes=[3,3,3,3];
+  for (let extra=0;extra<6;extra++) sizes[Math.floor(hash(chunk,salt,120+extra)*4)]++;
+  let start=0;
+  for (let i=0;i<4;i++) {
+    if (local<start+sizes[i]) return { id:chunk*4+i, size:sizes[i], offset:local-start };
+    start+=sizes[i];
+  }
+  return { id:chunk*4+3, size:sizes[3], offset:0 };
+}
+
+function neighborhoodAt(blockX,blockY) {
+  const xBand=neighborhoodBand(blockX,17);
+  const yBand=neighborhoodBand(blockY,43);
+  const typeRoll=hash(xBand.id,yBand.id,140);
+  return { type:typeRoll<.36?"LOW-RISE":typeRoll<.7?"MIXED":"SKYSCRAPER", xBand, yBand };
+}
 
 function tileAt(x, y) {
   const tx = Math.floor(x);
@@ -91,6 +123,7 @@ function tileAt(x, y) {
   const ly = floorMod(ty, BLOCK);
   const bx = Math.floor(tx / BLOCK);
   const by = Math.floor(ty / BLOCK);
+  const neighborhood=neighborhoodAt(bx,by);
 
   if (lx < ROAD || ly < ROAD) {
     const centerX = lx === 2;
@@ -122,8 +155,19 @@ function tileAt(x, y) {
   const cellH = ly < 11 ? 6 : 6;
   const solid = cellX >= margin && cellX < cellW && cellY >= margin && cellY < cellH;
   const heightSeed=hash(bx,by,lot+10);
-  const skylineBoost=hash(bx,by,lot+70)>.8?4+Math.floor(hash(bx,by,lot+71)*6):0;
-  const height=4.4+Math.floor(heightSeed*12)*.85+skylineBoost;
+  const accent=hash(bx,by,lot+70);
+  let height;
+  if (neighborhood.type==="LOW-RISE") {
+    height=4.4+Math.floor(heightSeed*4)*.7;
+    if (accent>.91) height+=4+Math.floor(hash(bx,by,lot+71)*5);
+  } else if (neighborhood.type==="MIXED") {
+    height=heightSeed<.2?4.4+Math.floor(heightSeed*10):5.2+Math.floor(heightSeed*9)*.9;
+    if (accent>.86) height+=3+Math.floor(hash(bx,by,lot+71)*5);
+  } else {
+    height=heightSeed<.16?5.2+Math.floor(heightSeed*18):9+Math.floor(heightSeed*12)*1.15;
+    if (accent>.72) height+=5+Math.floor(hash(bx,by,lot+71)*9);
+  }
+  height=Math.max(4.4,height);
   const tile={ solid, road: false, mark: false, height, style: Math.floor(hash(bx, by, lot + 30) * 4) };
   tileCache.set(cacheKey,tile); return tile;
 }
@@ -141,6 +185,21 @@ function truckCollides(x, y, angle) {
     const py=y+Math.sin(angle)*forward+Math.sin(angle+Math.PI/2)*side;
     return tileAt(px,py).solid;
   });
+}
+
+function helicopterSurfaceHeight(x,y) {
+  let surface=0;
+  for (const [forward,side] of [[0,0],[-1.15,-.62],[-1.15,.62],[1.15,-.62],[1.15,.62]]) {
+    const px=x+Math.cos(helicopter.angle)*forward+Math.cos(helicopter.angle+Math.PI/2)*side;
+    const py=y+Math.sin(helicopter.angle)*forward+Math.sin(helicopter.angle+Math.PI/2)*side;
+    const tile=tileAt(px,py);
+    if (tile.solid) surface=Math.max(surface,tile.height);
+  }
+  return surface+.08;
+}
+
+function helicopterBlocked(x,y,z) {
+  return helicopterSurfaceHeight(x,y)>z+.12;
 }
 
 function put(x, y, ch, color) {
@@ -210,7 +269,7 @@ const buildingPalettes = [
 ];
 
 function projectWorldHeight(worldZ, horizontalDepth) {
-  const focal=rows*.9;
+  const focal=projectionFocalRows;
   const relativeZ=worldZ-view.z;
   const cp=Math.cos(view.pitch), sp=Math.sin(view.pitch);
   const forward=horizontalDepth*cp+relativeZ*sp;
@@ -220,7 +279,7 @@ function projectWorldHeight(worldZ, horizontalDepth) {
 }
 
 function unprojectScreenHeight(screenY,horizontalDepth) {
-  const focal=rows*.9;
+  const focal=projectionFocalRows;
   const k=(rows*.5-screenY)/focal;
   const cp=Math.cos(view.pitch), sp=Math.sin(view.pitch);
   const denominator=cp-k*sp;
@@ -259,11 +318,22 @@ function castRoofRay(angle,pitch,dx=Math.cos(angle),dy=Math.sin(angle)) {
 
 function renderWorld() {
   updateView();
+  // A conventional pinhole view makes nearby vertical walls appear to
+  // collapse toward the edge when looking almost straight up. Gradually
+  // widen only the vertical FOV in that range so towers retain their height
+  // and presence without changing the normal horizontal-looking view.
+  const upwardLook=clamp((view.pitch-Math.PI*.2)/(Math.PI*.3),0,1);
+  const upwardBlend=upwardLook*upwardLook*(3-2*upwardLook);
+  projectionFocalRows=baseProjectionFocalRows*(1-upwardBlend*.38);
+  for (let y=0;y<rows;y++) {
+    screenYScales[y]=(rows*.5-(y+.5))/projectionFocalRows;
+    screenPitchOffsets[y]=Math.atan(screenYScales[y]);
+  }
   chars.fill(" ");
   colors.fill("#07140b");
   objectDepth.fill(Infinity);
   sceneDepth.fill(Infinity);
-  const focal=rows*.9;
+  const focal=projectionFocalRows;
   const horizon=rows*.5+Math.tan(view.pitch)*focal;
   const yawCos=Math.cos(view.angle), yawSin=Math.sin(view.angle);
   const pitchCos=Math.cos(view.pitch), pitchSin=Math.sin(view.pitch);
@@ -377,6 +447,7 @@ function renderWorld() {
 
   renderDynamicModels();
   if (car.occupied && cameraMode === "first") renderCockpit();
+  if (helicopter.occupied && cameraMode === "first") renderHelicopterCockpit();
   renderHud();
   paint();
 }
@@ -385,23 +456,23 @@ function updateView() {
   if (cameraMode === "first") {
     view.x=player.x;
     view.y=player.y;
-    view.z=car.occupied?1.08:player.z+1.65;
+    view.z=helicopter.occupied?helicopter.z+1.18:car.occupied?1.08:player.z+1.65;
     view.angle=player.angle;
     view.pitch=player.pitch;
     return;
   }
 
   const targetX=player.x, targetY=player.y;
-  const targetZ=car.occupied?1.08:player.z+1.73;
-  const followDistance=car.occupied?11.5:8.5;
-  const pitch=clamp(orbitPitch,-.48,.22);
-  const minimumDistance=car.occupied?1.8:.6;
-  const maximumHeight=targetZ+(car.occupied?9:7.5);
+  const targetZ=helicopter.occupied?helicopter.z+1.05:car.occupied?1.08:player.z+1.73;
+  const followDistance=helicopter.occupied?13:car.occupied?11.5:8.5;
+  const pitch=clamp(orbitPitch,-2.4,.55);
+  const minimumDistance=helicopter.occupied?2.3:car.occupied?1.8:.6;
+  const maximumHeight=targetZ+followDistance*2.5;
 
   // This is a game-style camera boom, not a spherical orbit: horizontal
   // distance stays constant while pitch changes camera height. Probe every
   // point along that boom and shorten only when geometry blocks it.
-  let chosen=car.occupied?1.15:.35;
+  let chosen=helicopter.occupied?1.6:car.occupied?1.15:.35;
   for (let d=minimumDistance; d<=followDistance; d+=.25) {
     const cx=targetX-Math.cos(orbitYaw)*d;
     const cy=targetY-Math.sin(orbitYaw)*d;
@@ -439,6 +510,27 @@ function truckBoxes() {
     ...[-1.05,.98].flatMap(f => [-.72,.72].map(s => offsetBox(x,y,a,f,s, {
       length:.55,width:.3,z0:.05,z1:.62,color:"#263e2b",chars:["O","0"]
     })))
+  ];
+}
+
+function helicopterBoxes() {
+  const a=helicopter.angle, x=helicopter.x, y=helicopter.y, z=helicopter.z;
+  const body={ color:"#e7b95b", chars:["@","#"] };
+  const rotorA=a+helicopter.rotorAngle;
+  const tailX=x-Math.cos(a)*2.45, tailY=y-Math.sin(a)*2.45;
+  return [
+    offsetBox(x,y,a,.15,0,{length:2.65,width:1.45,z0:z+.32,z1:z+1.38,...body}),
+    offsetBox(x,y,a,.83,0,{length:1.05,width:1.34,z0:z+.73,z1:z+1.58,color:"#b9edf0",chars:["=","+"]}),
+    offsetBox(x,y,a,-1.75,0,{length:2.45,width:.36,z0:z+.72,z1:z+1.08,color:"#bd8b39",chars:["#","+"]}),
+    offsetBox(x,y,a,-2.82,0,{length:.25,width:1.15,z0:z+.72,z1:z+1.62,color:"#d9a84d",chars:["%","#"]}),
+    offsetBox(x,y,a,0,-.72,{length:2.2,width:.12,z0:z+.06,z1:z+.18,color:"#d7d1a5",chars:["=","-"]}),
+    offsetBox(x,y,a,0,.72,{length:2.2,width:.12,z0:z+.06,z1:z+.18,color:"#d7d1a5",chars:["=","-"]}),
+    offsetBox(x,y,a,-.45,-.72,{length:.12,width:.12,z0:z+.12,z1:z+.55,color:"#a9935d",chars:["|","|"]}),
+    offsetBox(x,y,a,-.45,.72,{length:.12,width:.12,z0:z+.12,z1:z+.55,color:"#a9935d",chars:["|","|"]}),
+    offsetBox(x,y,rotorA,0,0,{length:6.7,width:.1,z0:z+1.68,z1:z+1.76,color:"#efffc9",chars:["=","-"]}),
+    offsetBox(x,y,rotorA+Math.PI/2,0,0,{length:6.7,width:.1,z0:z+1.67,z1:z+1.75,color:"#d7e8b6",chars:["=","-"]}),
+    offsetBox(tailX,tailY,a+Math.PI/2,0,0,{length:1.5,width:.08,z0:z+.55,z1:z+1.75,color:"#f6d279",chars:["+","|"]}),
+    offsetBox(tailX,tailY,a+Math.PI/2+helicopter.rotorAngle,0,0,{length:.12,width:1.3,z0:z+.72,z1:z+1.55,color:"#f6d279",chars:["+","|"]})
   ];
 }
 
@@ -481,7 +573,8 @@ function rayOrientedBox(originX, originY, dirX, dirY, box) {
 function renderDynamicModels() {
   const boxes = [];
   if (!car.occupied || cameraMode === "third") boxes.push(...truckBoxes());
-  if (!car.occupied && cameraMode === "third") boxes.push(...personBoxes());
+  if (!helicopter.occupied || cameraMode === "third") boxes.push(...helicopterBoxes());
+  if (!car.occupied && !helicopter.occupied && cameraMode === "third") boxes.push(...personBoxes());
   if (!boxes.length) return;
 
   for (let x=0; x<cols; x++) {
@@ -564,14 +657,48 @@ function renderRearViewMirror() {
   [...label].forEach((ch,i)=>put(Math.floor(cols/2-label.length/2)+i,y0,ch,"#c4ffd0"));
 }
 
+function renderHelicopterCockpit() {
+  const left=Math.floor(cols*.07), right=Math.ceil(cols*.93), dashY=rows-11;
+  const frame="#d3a850", glass="#86d9c8", instrument="#dfff83";
+  // Wide bubble windshield with roof frame and side pillars.
+  for (let x=left+5;x<=right-5;x++) put(x,3,x%3?"═":"─",frame);
+  for (let y=4;y<dashY;y++) {
+    const inset=Math.floor((y-4)*.18);
+    put(left+inset,y,"\\",frame);
+    put(right-inset,y,"/",frame);
+  }
+  const center=Math.floor(cols/2);
+  put(center,3,"┬",frame);
+  for (let y=4;y<dashY-1;y++) put(center,y,"│",y%4===0?frame:"#6d815f");
+  for (let x=left+Math.floor((dashY-4)*.18);x<=right-Math.floor((dashY-4)*.18);x++) put(x,dashY,"_",frame);
+
+  const surface=helicopterSurfaceHeight(helicopter.x,helicopter.y)-.08;
+  const altitude=Math.max(0,helicopter.z-surface);
+  const rotor=Math.round(helicopter.rotorPower*100);
+  const heading=((helicopter.angle*180/Math.PI)%360+360)%360;
+  const panel=` ROTOR ${String(rotor).padStart(3,"0")}%   ALT ${altitude.toFixed(1)}   HDG ${String(Math.round(heading)).padStart(3,"0")} `;
+  for (let x=center-25;x<=center+25;x++) put(x,dashY+1,"#","#5e492c");
+  [...panel].forEach((ch,i)=>put(center-Math.floor(panel.length/2)+i,dashY+2,ch,instrument));
+
+  // Artificial horizon and collective/cyclic controls.
+  const gauge=[" .--------. ","|    +     |","|----------|","|    v     |"," '--------' "];
+  gauge.forEach((line,gy)=>[...line].forEach((ch,gx)=>ch!==" "&&put(center+gx-6,dashY+4+gy,ch,ch==="-"?glass:"#ddb866")));
+  const collective=keys.has("Space")?"UP":keys.has("ControlLeft")||keys.has("ControlRight")?"DN":"HOLD";
+  const status=`COLLECTIVE ${collective}`;
+  [...status].forEach((ch,i)=>put(left+12+i,rows-3,ch,instrument));
+  const cyclic="  /|\\  ";
+  [...cyclic].forEach((ch,i)=>put(right-20+i,rows-4,ch,"#e6ce8a"));
+}
+
 function renderHud() {
-  const mode = car.occupied ? "DRIVING" : "ON FOOT";
+  const mode = helicopter.occupied ? "FLYING" : car.occupied ? "DRIVING" : "ON FOOT";
   const camera = cameraMode === "first" ? "1ST PERSON" : "3RD PERSON";
-  const speed = car.occupied ? `  ${String(Math.round(Math.abs(car.speed) * 18)).padStart(3,"0")} KM/H` : "";
+  const speed = helicopter.occupied ? `  ${String(Math.round(Math.abs(helicopter.speed) * 18)).padStart(3,"0")} KM/H` : car.occupied ? `  ${String(Math.round(Math.abs(car.speed) * 18)).padStart(3,"0")} KM/H` : "";
   const zoneX = Math.floor(player.x / BLOCK), zoneY = Math.floor(player.y / BLOCK);
+  const neighborhood=neighborhoodAt(zoneX,zoneY);
   const top = ` ENDLESS//CITY   ${mode}  ${camera}${speed} `;
   [...top].forEach((ch, i) => put(2+i, 1, ch, "#8aff9f"));
-  const pos = ` BLOCK ${zoneX >= 0 ? "+" : ""}${zoneX}:${zoneY >= 0 ? "+" : ""}${zoneY}  ALT ${player.z.toFixed(1)} `;
+  const pos = ` ${neighborhood.type} DISTRICT  BLOCK ${zoneX >= 0 ? "+" : ""}${zoneX}:${zoneY >= 0 ? "+" : ""}${zoneY}  ALT ${player.z.toFixed(1)} `;
   [...pos].forEach((ch, i) => put(2+i, 2, ch, "#579b65"));
   put(cols/2, rows/2, "+", "#caffd4");
   const mapX = cols - 15, mapY = 2;
@@ -579,8 +706,8 @@ function renderHud() {
     const t = tileAt(player.x + mx*.8, player.y + my*.8);
     put(mapX+mx, mapY+my+4, t.solid?"#":t.road?".":"·", t.solid?"#477b52":"#78bc85");
   }
-  put(mapX, mapY+4, car.occupied?"V":"@", "#e6ff81");
-  const help = car.occupied ? "W/S THROTTLE  A/D STEER  SPACE BRAKE  E EXIT  V VIEW" : "WASD MOVE  SHIFT SPRINT  SPACE JUMP  E CAR  V VIEW";
+  put(mapX, mapY+4, helicopter.occupied?"H":car.occupied?"V":"@", "#e6ff81");
+  const help = helicopter.occupied ? "W/S FLY  A/D YAW  SPACE RISE  CTRL DESCEND  E EXIT  V VIEW" : car.occupied ? "W/S THROTTLE  A/D STEER  SPACE BRAKE  E EXIT  V VIEW" : "WASD MOVE  SHIFT SPRINT  SPACE JUMP  E VEHICLE  V VIEW";
   [...help].forEach((ch,i)=>put(2+i, rows-2, ch, "#4d8158"));
 }
 
@@ -616,15 +743,22 @@ function movePlayer(dx, dy) {
 
 function update(dt) {
   dt = Math.min(dt, .05);
-  if (car.occupied) updateCar(dt);
-  else updateWalking(dt);
+  if (helicopter.occupied) updateHelicopter(dt);
+  else if (car.occupied) updateCar(dt);
+  else {
+    updateWalking(dt);
+    player.vz -= 12 * dt;
+    player.z += player.vz * dt;
+    if (player.z <= 0) { player.z = 0; player.vz = 0; player.onGround = true; }
+    helicopter.rotorPower=Math.max(0,helicopter.rotorPower-dt*.16);
+    helicopter.rotorAngle+=dt*(2+helicopter.rotorPower*24);
+  }
 
-  player.vz -= 12 * dt;
-  player.z += player.vz * dt;
-  if (player.z <= 0) { player.z = 0; player.vz = 0; player.onGround = true; }
-
-  const nearCar = !car.occupied && Math.hypot(player.x-car.x, player.y-car.y) < 2.1;
-  hint.textContent = nearCar ? "[ E ] ENTER VEHICLE" : "";
+  const nearCar = !car.occupied&&!helicopter.occupied&&Math.hypot(player.x-car.x, player.y-car.y) < 2.1;
+  const nearHeli = !car.occupied&&!helicopter.occupied&&Math.hypot(player.x-helicopter.x, player.y-helicopter.y) < 2.7&&Math.abs(player.z-helicopter.z)<1.5;
+  const heliSurface=helicopterSurfaceHeight(helicopter.x,helicopter.y)-.08;
+  if (helicopter.occupied&&helicopter.z>heliSurface+.16) hint.textContent="LAND BEFORE EXITING";
+  else hint.textContent = nearHeli ? "[ E ] ENTER HELICOPTER" : nearCar ? "[ E ] ENTER TRUCK" : "";
 }
 
 function updateWalking(dt) {
@@ -658,13 +792,54 @@ function updateCar(dt) {
   }
 }
 
-function toggleCar() {
+function updateHelicopter(dt) {
+  helicopter.rotorPower+=(1-helicopter.rotorPower)*Math.min(1,dt*1.8);
+  helicopter.rotorAngle+=dt*(5+helicopter.rotorPower*28);
+  const yawInput=(keys.has("KeyD")?1:0)-(keys.has("KeyA")?1:0);
+  helicopter.angle+=yawInput*1.25*dt;
+  const throttle=(keys.has("KeyW")?1:0)-(keys.has("KeyS")?1:0);
+  helicopter.speed+=throttle*5.2*dt;
+  helicopter.speed*=Math.pow(.48,dt);
+  helicopter.speed=clamp(helicopter.speed,-3.4,8.2);
+  const dx=Math.cos(helicopter.angle)*helicopter.speed*dt;
+  const dy=Math.sin(helicopter.angle)*helicopter.speed*dt;
+  if (!helicopterBlocked(helicopter.x+dx,helicopter.y+dy,helicopter.z)) {
+    helicopter.x+=dx; helicopter.y+=dy;
+  } else helicopter.speed*=.15;
+
+  const collective=(keys.has("Space")?1:0)-((keys.has("ControlLeft")||keys.has("ControlRight"))?1:0);
+  helicopter.vz+=collective*7.5*dt;
+  helicopter.vz*=Math.pow(collective? .42:.18,dt);
+  helicopter.vz=clamp(helicopter.vz,-5,5);
+  helicopter.z=Math.min(55,helicopter.z+helicopter.vz*dt);
+  const surface=helicopterSurfaceHeight(helicopter.x,helicopter.y);
+  if (helicopter.z<=surface) { helicopter.z=surface; helicopter.vz=Math.max(0,helicopter.vz); }
+  player.x=helicopter.x; player.y=helicopter.y; player.z=helicopter.z; player.facing=helicopter.angle;
+  if (cameraMode==="first") player.angle+=Math.atan2(Math.sin(helicopter.angle-player.angle),Math.cos(helicopter.angle-player.angle))*dt*4.5;
+}
+
+function toggleVehicle() {
+  if (helicopter.occupied) {
+    const surface=helicopterSurfaceHeight(helicopter.x,helicopter.y)-.08;
+    if (helicopter.z>surface+.16||surface>.1) return;
+    for (const a of [Math.PI/2,-Math.PI/2,Math.PI]) {
+      const ex=helicopter.x+Math.cos(helicopter.angle+a)*1.45;
+      const ey=helicopter.y+Math.sin(helicopter.angle+a)*1.45;
+      if (!collides(ex,ey)) {
+        player.x=ex; player.y=ey; player.z=0; player.vz=0;
+        helicopter.occupied=false; helicopter.speed=0; return;
+      }
+    }
+    return;
+  }
   if (car.occupied) {
     const exits = [Math.PI/2, -Math.PI/2, Math.PI];
     for (const a of exits) {
       const ex = car.x + Math.cos(car.angle+a)*1.2, ey = car.y + Math.sin(car.angle+a)*1.2;
       if (!collides(ex,ey)) { player.x=ex; player.y=ey; car.occupied=false; car.speed=0; return; }
     }
+  } else if (Math.hypot(player.x-helicopter.x, player.y-helicopter.y) < 2.7&&Math.abs(player.z-helicopter.z)<1.5) {
+    helicopter.occupied=true; player.x=helicopter.x; player.y=helicopter.y; player.z=helicopter.z; player.angle=helicopter.angle; player.facing=helicopter.angle;
   } else if (Math.hypot(player.x-car.x, player.y-car.y) < 2.1) {
     car.occupied = true; player.x=car.x; player.y=car.y; player.angle=car.angle; player.facing=car.angle;
   }
@@ -682,15 +857,16 @@ addEventListener("resize", resize);
 addEventListener("keydown", e => {
   keys.add(e.code);
   if (["Space","ArrowUp","ArrowDown"].includes(e.code)) e.preventDefault();
-  if (e.code === "Space" && !car.occupied && player.onGround) { player.vz=5.2; player.onGround=false; }
-  if (e.code === "KeyE" && !e.repeat) toggleCar();
+  if (e.code === "Space" && !car.occupied && !helicopter.occupied && player.onGround) { player.vz=5.2; player.onGround=false; }
+  if (e.code === "KeyE" && !e.repeat) toggleVehicle();
   if (e.code === "KeyV" && !e.repeat) {
     cameraMode = cameraMode === "first" ? "third" : "first";
     if (cameraMode === "third") {
       orbitYaw=player.angle;
-      orbitPitch=clamp(player.pitch,-.32,.16);
-    } else if (car.occupied) {
+      orbitPitch=clamp(player.pitch,-.55,.22);
+    } else if (car.occupied||helicopter.occupied) {
       player.angle=car.angle;
+      if (helicopter.occupied) player.angle=helicopter.angle;
     } else {
       player.angle=orbitYaw;
       player.pitch=clamp(orbitPitch,-LOOK_LIMIT,LOOK_LIMIT);
@@ -702,7 +878,7 @@ addEventListener("mousemove", e => {
   if (document.pointerLockElement !== canvas || !running) return;
   if (cameraMode === "third") {
     orbitYaw += e.movementX * .0026;
-    orbitPitch = clamp(orbitPitch - e.movementY * .0026, -.48, .22);
+    orbitPitch = clamp(orbitPitch - e.movementY * .0026, -2.4, .55);
   } else {
     player.angle += e.movementX * .0022;
     player.pitch = clamp(player.pitch - e.movementY * .0022, -LOOK_LIMIT, LOOK_LIMIT);

@@ -17,7 +17,7 @@ try {
 
     Write-Host "[3/3] Checking required game hooks"
     $game = Get-Content -Raw game.js
-    @("tileAt", "castRay", "castRayLayers", "castRoofRay", "cameraBlocked", "projectWorldHeight", "unprojectScreenHeight", "updateWalking", "updateCar", "updateView", "toggleCar", "truckCollides", "rayOrientedBox", "renderDynamicModels") | ForEach-Object {
+    @("tileAt", "neighborhoodAt", "castRay", "castRayLayers", "castRoofRay", "cameraBlocked", "projectWorldHeight", "unprojectScreenHeight", "updateWalking", "updateCar", "updateHelicopter", "updateView", "toggleVehicle", "truckCollides", "helicopterBlocked", "rayOrientedBox", "renderDynamicModels", "renderHelicopterCockpit") | ForEach-Object {
         if ($game -notmatch "function\s+$($_)\s*\(") { throw "Missing required function: $_" }
     }
     Write-Host "Validation passed." -ForegroundColor Green
