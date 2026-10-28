@@ -29,6 +29,8 @@ const player = { x: 2.5, y: 2.5, z: 0, vz: 0, angle: 0, facing: 0, pitch: 0, onG
 const car = { x: 8, y: 2.5, angle: 0, speed: 0, steer: 0, occupied: false };
 const view = { x: player.x, y: player.y, z: 0, angle: player.angle, pitch: 0 };
 let cameraMode = "first";
+let orbitYaw = 0;
+let orbitPitch = .08;
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const fract = v => v - Math.floor(v);
@@ -167,25 +169,38 @@ const buildingPalettes = [
   { wall:[1,.66,.32], window:"#ffe39a" },
   { wall:[.82,.48,1], window:"#f1b5ff" }
 ];
+
+function projectWorldHeight(worldZ, horizontalDepth) {
+  const focal=rows*.9;
+  const relativeZ=worldZ-view.z;
+  const cp=Math.cos(view.pitch), sp=Math.sin(view.pitch);
+  const forward=horizontalDepth*cp+relativeZ*sp;
+  const vertical=relativeZ*cp-horizontalDepth*sp;
+  if (forward<=.04) return vertical>0?-rows*2:rows*3;
+  return rows*.5-(vertical/forward)*focal;
+}
+
 function renderWorld() {
   updateView();
   chars.fill(" ");
   colors.fill("#07140b");
   objectDepth.fill(Infinity);
-  const horizon = rows * .48 + view.pitch * rows + view.z * 1.5;
+  const focal=rows*.9;
+  const horizon=rows*.5+Math.tan(view.pitch)*focal;
 
   // Sky, distant haze, road and sidewalk are all character fields.
   for (let y = 0; y < rows; y++) {
     const below = y - horizon;
     for (let x = 0; x < cols; x++) {
-      if (below < 0) {
+      const verticalAngle=view.pitch+Math.atan((rows*.5-y)/focal);
+      if (verticalAngle>=-.002) {
         const star = hash(x, y, 90) > .996 && y < horizon * .65;
         put(x, y, star ? "." : " ", star ? "#7ba384" : "#061109");
       } else {
-        const perspective = rows / Math.max(1, below);
-        const lateral = (x - cols / 2) / cols;
-        const wx = view.x + Math.cos(view.angle) * perspective + Math.cos(view.angle + Math.PI / 2) * lateral * perspective * 2.4;
-        const wy = view.y + Math.sin(view.angle) * perspective + Math.sin(view.angle + Math.PI / 2) * lateral * perspective * 2.4;
+        const rayYaw=view.angle-FOV/2+(x/cols)*FOV;
+        const perspective=Math.min(VIEW_DISTANCE*1.5,view.z/-Math.tan(verticalAngle));
+        const wx=view.x+Math.cos(rayYaw)*perspective;
+        const wy=view.y+Math.sin(rayYaw)*perspective;
         const t = tileAt(wx, wy);
         let ch = t.road ? (t.mark ? ":" : ".") : t.park ? "'" : ",";
         if (hash(Math.floor(wx * 2), Math.floor(wy * 2), 8) > .88) ch = t.road ? "·" : ";";
@@ -202,9 +217,9 @@ function renderWorld() {
     for (let layerIndex=layers.length-1; layerIndex>=0; layerIndex--) {
       const ray=layers[layerIndex];
       const corrected=ray.dist*correction;
-      const wallHeight=Math.min(rows*2,rows*ray.tile.height/Math.max(.15,corrected));
-      const bottom=horizon+rows*.42/Math.max(.2,corrected)+view.z*1.5;
-      const top=bottom-wallHeight;
+      const bottom=projectWorldHeight(0,corrected);
+      const top=projectWorldHeight(ray.tile.height,corrected);
+      const wallHeight=Math.max(1,bottom-top);
       const fog=clamp(1-corrected/VIEW_DISTANCE,0,1);
       const sideDim=ray.side?.72:1;
       const light=Math.floor(48+176*fog*sideDim);
@@ -224,31 +239,46 @@ function renderWorld() {
     }
   }
 
-  renderDynamicModels(horizon);
+  renderDynamicModels();
   if (car.occupied && cameraMode === "first") renderCockpit();
   renderHud();
   paint();
 }
 
 function updateView() {
-  view.angle = player.angle;
-  view.pitch = player.pitch;
-  view.z = player.z;
-  if (cameraMode === "first") { view.x = player.x; view.y = player.y; return; }
-
-  const followDistance = car.occupied ? 11.5 : 8.5;
-  const lift = car.occupied ? 2.05 : 1.35;
-  view.z = player.z + lift;
-  // Pull the camera toward the subject if a building is behind them.
-  let chosen = .45;
-  for (let d = .45; d <= followDistance; d += .2) {
-    const cx = player.x - Math.cos(player.angle) * d;
-    const cy = player.y - Math.sin(player.angle) * d;
-    if (collides(cx, cy, .16)) break;
-    chosen = d;
+  if (cameraMode === "first") {
+    view.x=player.x;
+    view.y=player.y;
+    view.z=car.occupied?1.08:player.z+1.65;
+    view.angle=player.angle;
+    view.pitch=player.pitch;
+    return;
   }
-  view.x = player.x - Math.cos(player.angle) * chosen;
-  view.y = player.y - Math.sin(player.angle) * chosen;
+
+  const targetX=player.x, targetY=player.y;
+  const targetZ=car.occupied?1.08:player.z+1.73;
+  const followDistance=car.occupied?23:17;
+  const pitch=clamp(orbitPitch,-1.02,.68);
+  const horizontalFactor=Math.cos(pitch);
+  const minimumDistance=car.occupied?2:.7;
+
+  // Probe outward from the target. The last safe point becomes the camera,
+  // producing the same wall-avoidance behavior as a modern chase camera.
+  let chosen=minimumDistance;
+  for (let d=minimumDistance; d<=followDistance; d+=.25) {
+    const horizontal=d*horizontalFactor;
+    const cx=targetX-Math.cos(orbitYaw)*horizontal;
+    const cy=targetY-Math.sin(orbitYaw)*horizontal;
+    if (collides(cx,cy,.22)) break;
+    chosen=d;
+  }
+
+  const horizontalDistance=Math.max(.2,chosen*horizontalFactor);
+  view.x=targetX-Math.cos(orbitYaw)*horizontalDistance;
+  view.y=targetY-Math.sin(orbitYaw)*horizontalDistance;
+  view.z=Math.max(.28,targetZ-Math.sin(pitch)*chosen);
+  view.angle=Math.atan2(targetY-view.y,targetX-view.x);
+  view.pitch=Math.atan2(targetZ-view.z,horizontalDistance);
 }
 
 function offsetBox(baseX, baseY, angle, forward, side, spec) {
@@ -311,7 +341,7 @@ function rayOrientedBox(originX, originY, dirX, dirY, box) {
   return { distance: near>0 ? near : far, axis };
 }
 
-function renderDynamicModels(horizon) {
+function renderDynamicModels() {
   const boxes = [];
   if (!car.occupied || cameraMode === "third") boxes.push(...truckBoxes());
   if (!car.occupied && cameraMode === "third") boxes.push(...personBoxes());
@@ -326,9 +356,8 @@ function renderDynamicModels(horizon) {
       if (!hit) continue;
       const depth=hit.distance*correction;
       if (depth<=.08 || depth>=depthBuffer[x]) continue;
-      const ground=horizon+rows*.42/depth+view.z*1.5;
-      const top=Math.floor(ground-rows*box.z1/depth);
-      const bottom=Math.ceil(ground-rows*box.z0/depth);
+      const top=Math.floor(projectWorldHeight(box.z1,depth));
+      const bottom=Math.ceil(projectWorldHeight(box.z0,depth));
       const fog=clamp(1-depth/VIEW_DISTANCE,.25,1);
       const color=box.color;
       const ch=box.chars[hit.axis];
@@ -466,8 +495,9 @@ function updateWalking(dt) {
   let forward = (keys.has("KeyW") ? 1 : 0) - (keys.has("KeyS") ? 1 : 0);
   let strafe = (keys.has("KeyD") ? 1 : 0) - (keys.has("KeyA") ? 1 : 0);
   if (forward && strafe) { forward *= .707; strafe *= .707; }
-  const moveX = Math.cos(player.angle)*forward + Math.cos(player.angle+Math.PI/2)*strafe;
-  const moveY = Math.sin(player.angle)*forward + Math.sin(player.angle+Math.PI/2)*strafe;
+  const movementAngle=cameraMode==="third"?orbitYaw:player.angle;
+  const moveX = Math.cos(movementAngle)*forward + Math.cos(movementAngle+Math.PI/2)*strafe;
+  const moveY = Math.sin(movementAngle)*forward + Math.sin(movementAngle+Math.PI/2)*strafe;
   if (Math.hypot(moveX,moveY)>.01) player.facing=Math.atan2(moveY,moveX);
   movePlayer(moveX*speed*dt, moveY*speed*dt);
 }
@@ -486,7 +516,9 @@ function updateCar(dt) {
   if (!truckCollides(car.x + dx, car.y + dy, car.angle)) { car.x += dx; car.y += dy; }
   else car.speed *= -.18;
   player.x = car.x; player.y = car.y; player.facing = car.angle;
-  player.angle += Math.atan2(Math.sin(car.angle-player.angle),Math.cos(car.angle-player.angle))*dt*7;
+  if (cameraMode === "first") {
+    player.angle += Math.atan2(Math.sin(car.angle-player.angle),Math.cos(car.angle-player.angle))*dt*7;
+  }
 }
 
 function toggleCar() {
@@ -515,13 +547,29 @@ addEventListener("keydown", e => {
   if (["Space","ArrowUp","ArrowDown"].includes(e.code)) e.preventDefault();
   if (e.code === "Space" && !car.occupied && player.onGround) { player.vz=5.2; player.onGround=false; }
   if (e.code === "KeyE" && !e.repeat) toggleCar();
-  if (e.code === "KeyV" && !e.repeat) cameraMode = cameraMode === "first" ? "third" : "first";
+  if (e.code === "KeyV" && !e.repeat) {
+    cameraMode = cameraMode === "first" ? "third" : "first";
+    if (cameraMode === "third") {
+      orbitYaw=player.angle;
+      orbitPitch=clamp(player.pitch,-.45,.45);
+    } else if (car.occupied) {
+      player.angle=car.angle;
+    } else {
+      player.angle=orbitYaw;
+      player.pitch=clamp(orbitPitch,-.62,.62);
+    }
+  }
 });
 addEventListener("keyup", e => keys.delete(e.code));
 addEventListener("mousemove", e => {
   if (document.pointerLockElement !== canvas || !running) return;
-  player.angle += e.movementX * .0022;
-  player.pitch = clamp(player.pitch - e.movementY * .0022, -.62, .62);
+  if (cameraMode === "third") {
+    orbitYaw += e.movementX * .0026;
+    orbitPitch = clamp(orbitPitch - e.movementY * .0026, -1.02, .68);
+  } else {
+    player.angle += e.movementX * .0022;
+    player.pitch = clamp(player.pitch - e.movementY * .0022, -.62, .62);
+  }
 });
 canvas.addEventListener("click", () => running && canvas.requestPointerLock());
 playButton.addEventListener("click", () => {

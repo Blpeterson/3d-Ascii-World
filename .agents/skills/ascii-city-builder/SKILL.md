@@ -21,6 +21,9 @@ Preserve the game's core identity: the visible world is a character-cell buffer 
 - Keep collision and rendering driven by the same `tileAt` result; visual geometry must not become passable, or invisible geometry solid.
 - Camera features should read from `view`; gameplay physics should read and write `player` or `car`.
 - Maintain both first- and third-person behavior when adding movement, vehicles, or camera effects.
+- Third-person cameras remain centered on the character head or occupied vehicle target. Keep orbit yaw/pitch separate from actor heading; mouse input moves the camera spherically around the target, and collision shortens the orbit without changing that target.
+- Project vertical world positions through `projectWorldHeight`; do not simulate camera pitch by shifting the horizon or screen-space models.
+- Tune third-person model size with chase distance before changing world geometry, because model dimensions also define collision and spatial relationships.
 - Write pixels only in `paint`. World and HUD code should write characters through `put`.
 
 ## Workflow
