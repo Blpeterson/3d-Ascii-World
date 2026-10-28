@@ -18,7 +18,7 @@ python server.py
 
 Then open <http://127.0.0.1:8000>. The Node launcher also prints one or more LAN URLs. Anyone on the same network can join by opening that `http://YOUR-IP:8000` address in a browser. Windows may ask you to allow Node.js through the private-network firewall.
 
-Multiplayer uses the Node launcher's built-in WebSocket relay and does not require packages. The Python launcher remains a single-player static fallback.
+Multiplayer uses the Node launcher's built-in WebSocket relay and does not require packages. The Python launcher delegates to Node when available and clearly labels its static fallback otherwise.
 
 ## Controls
 
@@ -26,9 +26,9 @@ Multiplayer uses the Node launcher's built-in WebSocket relay and does not requi
 - **Mouse** — look
 - **V** — switch first-person / third-person camera
 - **Mouse** — natural vertical look with an expanded up/down range
-- **Shift** — sprint
+- **Double-tap W, then hold** — sprint on foot
+- **Shift** — sneak/crouch on foot; descend in the helicopter
 - **Space** — jump / handbrake / helicopter collective up
-- **Shift** — helicopter collective down
 - **Ctrl + Mouse** — temporarily free-orbit the third-person truck/helicopter camera
 - **E** — enter or exit the truck or helicopter
 - **Escape** — release the mouse and pause
@@ -37,6 +37,6 @@ The world is coordinate-seeded rather than stored, so it has no fixed edge and r
 
 Every connected player receives a nearby personal truck and helicopter. Players, shirts, pants, shoes, trucks, and helicopters use a consistent per-player color style and are visible from either camera mode.
 
-Driving in first-person includes a windshield frame, live rear-view mirror, instruments, hood, and a steering wheel that follows the front-wheel input. The helicopter has a separate cockpit, rotor/altitude/heading instruments, animated world-space rotors, and can land on generated rooftops. Land fully, press **E** to step onto the roof, then walk, jump, and carefully approach roof edges. The city is grouped into deterministic multi-block low-rise, mixed, and skyscraper districts.
+Driving in first-person includes a windshield frame, live rear-view mirror, instruments, hood, and a steering wheel that follows the front-wheel input. The helicopter has a separate cockpit, rotor/altitude/heading instruments, animated world-space rotors, and can land on generated rooftops. Roughly 18% of buildings receive a lightweight exterior spiral ramp that wraps to the roof; trucks cannot use these player ramps.
 
-In third person, occupied vehicles use a smooth trailing chase camera. Hold **Ctrl** while moving the mouse for free orbit; release it to flow back behind the vehicle. Rooftop walking uses footprint support, edge protection, and automatic stuck recovery.
+In third person, occupied vehicles use a smooth trailing chase camera. Hold **Ctrl** while moving the mouse for free orbit; release it to flow back behind the vehicle. Walking and sprinting can leave roof edges; hold **Shift** to sneak, crouch, and gain Minecraft-style ledge protection. Automatic stuck recovery still prevents wall clipping during falls.

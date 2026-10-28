@@ -32,12 +32,13 @@ let raySines = [];
 let projectionFocalRows = 45;
 let baseProjectionFocalRows = 45;
 const tileCache = new Map();
+const buildingCache = new Map();
 let running = false;
 let lastTime = performance.now();
 let fps = 60;
 const keys = new Set();
 
-const player = { x: 2.5, y: 2.5, z: 0, vz: 0, angle: 0, facing: 0, pitch: 0, onGround: true };
+const player = { x: 2.5, y: 2.5, z: 0, vz: 0, angle: 0, facing: 0, pitch: 0, onGround: true, crouching: false, crouchAmount: 0, sprinting: false };
 const safePlayerPosition = { x: player.x, y: player.y, z: player.z };
 const car = { x: 8, y: 2.5, angle: 0, speed: 0, steer: 0, occupied: false };
 const helicopter = { x: 2.5, y: 5, z: .08, angle: Math.PI/2, speed: 0, vz: 0, occupied: false, rotorAngle: 0, rotorPower: 0 };
@@ -52,6 +53,8 @@ let localPeerId=null;
 let localStyle=0;
 let spawnAssigned=false;
 let lastNetworkSend=0;
+let lastForwardTap=-Infinity;
+let forwardReleased=true;
 
 const playerStyles=[
   { shirt:"#66dc80",shirtDark:"#4eaf64",pants:"#3f9254",shoe:"#b8f7c4",skin:"#c8ffd5",truck:"#56c96f",truckDark:"#489d5b",heli:"#e7b95b",heliDark:"#bd8b39" },
@@ -129,50 +132,15 @@ function neighborhoodAt(blockX,blockY) {
   return { type:typeRoll<.36?"LOW-RISE":typeRoll<.7?"MIXED":"SKYSCRAPER", xBand, yBand };
 }
 
-function tileAt(x, y) {
-  const tx = Math.floor(x);
-  const ty = Math.floor(y);
-  const cacheKey=`${tx},${ty}`;
-  const cached=tileCache.get(cacheKey);
+function buildingDescriptor(bx,by,lot) {
+  const key=`${bx}:${by}:${lot}`;
+  const cached=buildingCache.get(key);
   if (cached) return cached;
-  if (tileCache.size>24000) tileCache.clear();
-  const lx = floorMod(tx, BLOCK);
-  const ly = floorMod(ty, BLOCK);
-  const bx = Math.floor(tx / BLOCK);
-  const by = Math.floor(ty / BLOCK);
+  const density=hash(bx*2+lot,by*2-lot,1);
+  const exists=density>=.15;
+  const margin=density>.78?1:2;
   const neighborhood=neighborhoodAt(bx,by);
-
-  if (lx < ROAD || ly < ROAD) {
-    const centerX = lx === 2;
-    const centerY = ly === 2;
-    const tile={ solid: false, road: true, mark: centerX || centerY, height: 0, style: 0 };
-    tileCache.set(cacheKey,tile); return tile;
-  }
-
-  // Alleys split many blocks and make the city permeable on foot.
-  const alleyX = lx === 11 && hash(bx, by, 4) > .34;
-  const alleyY = ly === 11 && hash(bx, by, 5) > .34;
-  if (alleyX || alleyY) {
-    const tile={ solid: false, road: false, mark: false, height: 0, style: 0 };
-    tileCache.set(cacheKey,tile); return tile;
-  }
-
-  // Courtyards and small parks provide variation between towers.
-  const lot = (lx < 11 ? 0 : 1) + (ly < 11 ? 0 : 2);
-  const density = hash(bx * 2 + lot, by * 2 - lot, 1);
-  if (density < .15) {
-    const tile={ solid: false, road: false, park: true, mark: false, height: 0, style: 0 };
-    tileCache.set(cacheKey,tile); return tile;
-  }
-
-  const margin = density > .78 ? 1 : 2;
-  const cellX = lx < 11 ? lx - ROAD : lx - 12;
-  const cellY = ly < 11 ? ly - ROAD : ly - 12;
-  const cellW = lx < 11 ? 6 : 6;
-  const cellH = ly < 11 ? 6 : 6;
-  const solid = cellX >= margin && cellX < cellW && cellY >= margin && cellY < cellH;
-  const heightSeed=hash(bx,by,lot+10);
-  const accent=hash(bx,by,lot+70);
+  const heightSeed=hash(bx,by,lot+10), accent=hash(bx,by,lot+70);
   let height;
   if (neighborhood.type==="LOW-RISE") {
     height=4.4+Math.floor(heightSeed*4)*.7;
@@ -184,8 +152,102 @@ function tileAt(x, y) {
     height=heightSeed<.16?5.2+Math.floor(heightSeed*18):9+Math.floor(heightSeed*12)*1.15;
     if (accent>.72) height+=5+Math.floor(hash(bx,by,lot+71)*9);
   }
-  height=Math.max(4.4,height);
-  const tile={ solid, road: false, mark: false, height, style: Math.floor(hash(bx, by, lot + 30) * 4) };
+  const baseX=lot%2?12:5, baseY=lot>1?12:5;
+  const descriptor={
+    key,exists,margin,height:Math.max(4.4,height),style:Math.floor(hash(bx,by,lot+30)*4),
+    hasRamp:exists&&hash(bx,by,lot+210)<.18,
+    minX:bx*BLOCK+baseX+margin,maxX:bx*BLOCK+baseX+6,
+    minY:by*BLOCK+baseY+margin,maxY:by*BLOCK+baseY+6
+  };
+  buildingCache.set(key,descriptor);
+  return descriptor;
+}
+
+function externalRampAt(x,y) {
+  const centerBX=Math.floor(x/BLOCK), centerBY=Math.floor(y/BLOCK);
+  for (let by=centerBY-1;by<=centerBY+1;by++) for (let bx=centerBX-1;bx<=centerBX+1;bx++) for (let lot=0;lot<4;lot++) {
+    const building=buildingDescriptor(bx,by,lot);
+    if (!building.hasRamp) continue;
+    const width=building.maxX-building.minX, height=building.maxY-building.minY;
+    const perimeter=2*(width+height);
+    if (x>=building.maxX&&x<building.maxX+.85&&y>=building.minY-.85&&y<building.minY) {
+      return {building,phase:width/perimeter,side:"north-east"};
+    }
+    if (x>=building.maxX&&x<building.maxX+.85&&y>=building.maxY&&y<building.maxY+.85) {
+      return {building,phase:(width+height)/perimeter,side:"south-east"};
+    }
+    if (x>=building.minX-.85&&x<building.minX&&y>=building.maxY&&y<building.maxY+.85) {
+      return {building,phase:(2*width+height)/perimeter,side:"south-west"};
+    }
+    if (x>=building.minX-.85&&x<building.minX&&y>=building.minY-.85&&y<building.minY) {
+      return {building,phase:1,side:"north-west"};
+    }
+    if (x>=building.minX&&x<building.maxX&&y>=building.minY-.85&&y<building.minY) {
+      return {building,phase:(x-building.minX)/perimeter,side:"north"};
+    }
+    if (x>=building.maxX&&x<building.maxX+.85&&y>=building.minY&&y<building.maxY) {
+      return {building,phase:(width+y-building.minY)/perimeter,side:"east"};
+    }
+    if (x>=building.minX&&x<building.maxX&&y>=building.maxY&&y<building.maxY+.85) {
+      return {building,phase:(width+height+building.maxX-x)/perimeter,side:"south"};
+    }
+    if (x>=building.minX-.85&&x<building.minX&&y>=building.minY&&y<building.maxY) {
+      return {building,phase:(2*width+height+building.maxY-y)/perimeter,side:"west"};
+    }
+  }
+  return null;
+}
+
+function decorateExternalRamp(tile,tx,ty) {
+  if (tile.solid) return tile;
+  const ramp=externalRampAt(tx+.5,ty+.5);
+  return ramp?{...tile,externalRamp:true,vehicleSolid:true,rampPhase:ramp.phase,rampHeight:ramp.building.height,rampBuildingId:ramp.building.key,rampSide:ramp.side}:tile;
+}
+
+function tileAt(x, y) {
+  const tx = Math.floor(x);
+  const ty = Math.floor(y);
+  const cacheKey=`${tx},${ty}`;
+  const cached=tileCache.get(cacheKey);
+  if (cached) return cached;
+  if (tileCache.size>24000) tileCache.clear();
+  const lx = floorMod(tx, BLOCK);
+  const ly = floorMod(ty, BLOCK);
+  const bx = Math.floor(tx / BLOCK);
+  const by = Math.floor(ty / BLOCK);
+
+  if (lx < ROAD || ly < ROAD) {
+    const centerX = lx === 2;
+    const centerY = ly === 2;
+    const tile=decorateExternalRamp({ solid: false, road: true, mark: centerX || centerY, height: 0, style: 0 },tx,ty);
+    tileCache.set(cacheKey,tile); return tile;
+  }
+
+  // Alleys split many blocks and make the city permeable on foot.
+  const alleyX = lx === 11 && hash(bx, by, 4) > .34;
+  const alleyY = ly === 11 && hash(bx, by, 5) > .34;
+  if (alleyX || alleyY) {
+    const tile=decorateExternalRamp({ solid: false, road: false, mark: false, height: 0, style: 0 },tx,ty);
+    tileCache.set(cacheKey,tile); return tile;
+  }
+
+  // Courtyards and small parks provide variation between towers.
+  const lot = (lx < 11 ? 0 : 1) + (ly < 11 ? 0 : 2);
+  const building=buildingDescriptor(bx,by,lot);
+  if (!building.exists) {
+    const tile=decorateExternalRamp({ solid: false, road: false, park: true, mark: false, height: 0, style: 0 },tx,ty);
+    tileCache.set(cacheKey,tile); return tile;
+  }
+
+  const margin = building.margin;
+  const cellX = lx < 11 ? lx - ROAD : lx - 12;
+  const cellY = ly < 11 ? ly - ROAD : ly - 12;
+  const cellW = lx < 11 ? 6 : 6;
+  const cellH = ly < 11 ? 6 : 6;
+  const solid = cellX >= margin && cellX < cellW && cellY >= margin && cellY < cellH;
+  let tile={ solid, road: false, mark: false, height: building.height, style: building.style,buildingId:solid?building.key:null,hasExternalRamp:solid&&building.hasRamp,
+    buildingMinX:building.minX,buildingMaxX:building.maxX,buildingMinY:building.minY,buildingMaxY:building.maxY };
+  tile=decorateExternalRamp(tile,tx,ty);
   tileCache.set(cacheKey,tile); return tile;
 }
 
@@ -194,11 +256,21 @@ function collides(x, y, radius = PLAYER_RADIUS) {
   return pts.some(([dx, dy]) => tileAt(x + dx, y + dy).solid);
 }
 
-function walkingSurfaceHeight(x,y,radius=PLAYER_RADIUS) {
+function rampSurfaceHeight(tile,feetZ) {
+  const rise=1.8;
+  const withinLoop=tile.rampPhase*rise;
+  const circuit=Math.round((feetZ-withinLoop)/rise);
+  return clamp(withinLoop+circuit*rise,0,tile.rampHeight);
+}
+
+function walkingSurfaceHeight(x,y,radius=PLAYER_RADIUS,feetZ=player.z) {
   let surface=0;
+  const centerTile=tileAt(x,y);
   for (const [dx,dy] of [[0,0],[-radius,-radius],[radius,-radius],[-radius,radius],[radius,radius]]) {
     const tile=tileAt(x+dx,y+dy);
-    if (tile.solid) surface=Math.max(surface,tile.height);
+    if (centerTile.externalRamp) {
+      if (tile.externalRamp&&tile.rampBuildingId===centerTile.rampBuildingId) surface=Math.max(surface,rampSurfaceHeight(tile,feetZ));
+    } else if (tile.solid) surface=Math.max(surface,tile.height);
   }
   return surface;
 }
@@ -246,7 +318,8 @@ function truckCollides(x, y, angle) {
   return probes.some(([forward,side]) => {
     const px=x+Math.cos(angle)*forward+Math.cos(angle+Math.PI/2)*side;
     const py=y+Math.sin(angle)*forward+Math.sin(angle+Math.PI/2)*side;
-    return tileAt(px,py).solid;
+    const tile=tileAt(px,py);
+    return tile.solid||tile.vehicleSolid;
   });
 }
 
@@ -314,11 +387,13 @@ function castRayLayers(angle, maxLayers = 10, dx = Math.cos(angle), dy = Math.si
     if (sideX<sideY) { sideX+=deltaX; mapX+=stepX; side=0; distance=sideX-deltaX; }
     else { sideY+=deltaY; mapY+=stepY; side=1; distance=sideY-deltaY; }
     const tile=tileAt(mapX+.5,mapY+.5);
-    if (tile.solid && !insideSolid) {
+    const renderSolid=tile.solid;
+    if (renderSolid && !insideSolid) {
       const wallX=side===0?originY+distance*dy:originX+distance*dx;
-      layers.push({ dist:distance,tile,side,wallX:fract(wallX) });
+      const face=side===0?(dx>0?"west":"east"):(dy>0?"north":"south");
+      layers.push({ dist:distance,tile,side,face,wallX:fract(wallX),hitX:originX+distance*dx,hitY:originY+distance*dy });
     }
-    insideSolid=tile.solid;
+    insideSolid=renderSolid;
   }
   return layers;
 }
@@ -330,6 +405,20 @@ const buildingPalettes = [
   { wall:[1,.66,.32], window:"#ffe39a" },
   { wall:[.82,.48,1], window:"#f1b5ff" }
 ];
+
+function exteriorRampBand(tile,face,x,y,worldZ) {
+  if (!tile.hasExternalRamp) return false;
+  const width=tile.buildingMaxX-tile.buildingMinX, height=tile.buildingMaxY-tile.buildingMinY;
+  const perimeter=2*(width+height);
+  let phase;
+  if (face==="north") phase=(x-tile.buildingMinX)/perimeter;
+  else if (face==="east") phase=(width+y-tile.buildingMinY)/perimeter;
+  else if (face==="south") phase=(width+height+tile.buildingMaxX-x)/perimeter;
+  else phase=(2*width+height+tile.buildingMaxY-y)/perimeter;
+  const rise=1.8, base=clamp(phase,0,1)*rise;
+  const nearest=base+Math.round((worldZ-base)/rise)*rise;
+  return Math.abs(worldZ-nearest)<.14;
+}
 
 function projectWorldHeight(worldZ, horizontalDepth) {
   const focal=projectionFocalRows;
@@ -366,6 +455,11 @@ function castRoofRay(angle,pitch,dx=Math.cos(angle),dy=Math.sin(angle)) {
   let sideX=dx<0?(originX-mapX)*deltaX:(mapX+1-originX)*deltaX;
   let sideY=dy<0?(originY-mapY)*deltaY:(mapY+1-originY)*deltaY;
   let entry=0;
+  const originTile=tileAt(originX,originY);
+  if (originTile.solid&&view.z>originTile.height+.02) {
+    const roofDistance=(originTile.height-view.z)/slope;
+    if (roofDistance>=0&&roofDistance<=Math.min(sideX,sideY)+.01) return {dist:roofDistance,tile:originTile};
+  }
   while (entry<VIEW_DISTANCE) {
     if (sideX<sideY) { entry=sideX; sideX+=deltaX; mapX+=stepX; }
     else { entry=sideY; sideY+=deltaY; mapY+=stepY; }
@@ -417,21 +511,21 @@ function renderWorld() {
     const baseY=forwardY+upY*screenY;
     const rayZ=forwardZ+upZ*screenY;
     for (let x = 0; x < cols; x++) {
+      const rayX=baseX+rightX*screenXScales[x];
+      const rayY=baseY+rightY*screenXScales[x];
       if (rayZ>=-.0001) {
         const star = hash(x, y, 90) > .996 && y < horizon * .65;
         put(x, y, star ? "." : " ", star ? "#7ba384" : "#061109");
       } else {
-        const rayX=baseX+rightX*screenXScales[x];
-        const rayY=baseY+rightY*screenXScales[x];
         let distance=view.z/-rayZ;
         const horizontalDistance=distance*Math.hypot(rayX,rayY);
         if (horizontalDistance>VIEW_DISTANCE*1.5) distance*=VIEW_DISTANCE*1.5/horizontalDistance;
         const wx=view.x+rayX*distance;
         const wy=view.y+rayY*distance;
         const t = tileAt(wx, wy);
-        let ch = t.road ? (t.mark ? ":" : ".") : t.park ? "'" : ",";
+        let ch = t.externalRamp ? "/" : t.road ? (t.mark ? ":" : ".") : t.park ? "'" : ",";
         if (hash(Math.floor(wx * 2), Math.floor(wy * 2), 8) > .88) ch = t.road ? "·" : ";";
-        put(x, y, ch, t.road ? "#35513d" : t.park ? "#386a3d" : "#46574a");
+        put(x, y, ch, t.externalRamp ? "#d8b66f" : t.road ? "#35513d" : t.park ? "#386a3d" : "#46574a");
       }
     }
   }
@@ -458,14 +552,16 @@ function renderWorld() {
       const wallColor=`rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
       for (let y=Math.max(0,Math.floor(top)); y<Math.min(rows,Math.ceil(bottom)); y++) {
         const worldZ=clamp(unprojectScreenHeight(y+.5,corrected),0,ray.tile.height);
+        const rampBand=exteriorRampBand(ray.tile,ray.face,ray.hitX,ray.hitY,worldZ);
         const windowBand=Math.floor(worldZ*2.1)%2===0;
         const windowColumn=Math.floor(ray.wallX*8)%3===1;
         const lit=windowBand&&windowColumn&&corrected<34&&hash(Math.floor(ray.wallX*20),Math.floor(worldZ*6),style)>.47;
-        const ch=lit?(style%2?"[]"[x%2]:"¤"):ramp[shadeIndex];
+        const ch=rampBand?"/":lit?(style%2?"[]"[x%2]:"¤"):ramp[shadeIndex];
         const index=y*cols+x;
-        if (corrected<sceneDepth[index]) {
-          sceneDepth[index]=corrected;
-          put(x,y,ch,lit?palette.window:wallColor);
+        const cellDepth=corrected*pitchCos+(worldZ-view.z)*pitchSin;
+        if (cellDepth>.04&&cellDepth<sceneDepth[index]) {
+          sceneDepth[index]=cellDepth;
+          put(x,y,ch,rampBand?"#e2c27b":lit?palette.window:wallColor);
         }
       }
     }
@@ -475,30 +571,40 @@ function renderWorld() {
   // Per-cell depth keeps roofs behind nearer walls and in front of farther towers.
   if (view.z>2.15) {
     const roofChars=["^","~",":","="];
-    for (let y=0; y<rows; y+=2) {
-      const sampleY=Math.min(rows-1,y+1);
+    const roofStep=view.pitch<-.6||view.z>18?1:2;
+    for (let y=0; y<rows; y+=roofStep) {
+      const sampleY=Math.min(rows-1,y+Math.floor(roofStep/2));
       const screenY=screenYScales[sampleY];
       const baseX=forwardX+upX*screenY;
       const baseY=forwardY+upY*screenY;
       const rayZ=forwardZ+upZ*screenY;
       if (rayZ>=-.0001) continue;
-      for (let x=0; x<cols; x+=2) {
-        const sampleX=Math.min(cols-1,x+1);
+      for (let x=0; x<cols; x+=roofStep) {
+        const sampleX=Math.min(cols-1,x+Math.floor(roofStep/2));
         const rayX=baseX+rightX*screenXScales[sampleX];
         const rayY=baseY+rightY*screenXScales[sampleX];
         const horizontalLength=Math.hypot(rayX,rayY);
-        if (horizontalLength<.0001) continue;
-        const rayYaw=Math.atan2(rayY,rayX);
-        const rayPitch=Math.atan2(rayZ,horizontalLength);
-        const roof=castRoofRay(rayYaw,rayPitch,rayX/horizontalLength,rayY/horizontalLength);
+        let roof,forwardDepth,rayYaw=view.angle;
+        if (horizontalLength<.0001) {
+          const tile=tileAt(view.x,view.y);
+          if (rayZ<-.0001&&tile.solid&&view.z>tile.height+.02) {
+            forwardDepth=(tile.height-view.z)/rayZ;
+            roof={dist:0,tile};
+          }
+        } else {
+          rayYaw=Math.atan2(rayY,rayX);
+          const rayPitch=Math.atan2(rayZ,horizontalLength);
+          roof=castRoofRay(rayYaw,rayPitch,rayX/horizontalLength,rayY/horizontalLength);
+          if (roof) forwardDepth=roof.dist/horizontalLength;
+        }
         if (!roof) continue;
-        const corrected=roof.dist*Math.cos(rayYaw-view.angle);
+        const corrected=forwardDepth;
         const style=roof.tile.style;
         const palette=buildingPalettes[style];
         const light=clamp(155-corrected*2,65,155);
         const rgb=palette.wall.map(component=>Math.min(255,Math.floor(light*component)));
         const color=`rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
-        for (let yy=y;yy<Math.min(rows,y+2);yy++) for (let xx=x;xx<Math.min(cols,x+2);xx++) {
+        for (let yy=y;yy<Math.min(rows,y+roofStep);yy++) for (let xx=x;xx<Math.min(cols,x+roofStep);xx++) {
           const index=yy*cols+xx;
           if (corrected>=sceneDepth[index]) continue;
           sceneDepth[index]=corrected;
@@ -519,14 +625,14 @@ function updateView() {
   if (cameraMode === "first") {
     view.x=player.x;
     view.y=player.y;
-    view.z=helicopter.occupied?helicopter.z+1.18:car.occupied?1.08:player.z+1.48;
+    view.z=helicopter.occupied?helicopter.z+1.18:car.occupied?1.08:player.z+1.48-player.crouchAmount*.36;
     view.angle=player.angle;
     view.pitch=player.pitch;
     return;
   }
 
   const targetX=player.x, targetY=player.y;
-  const targetZ=helicopter.occupied?helicopter.z+1.05:car.occupied?1.08:player.z+1.55;
+  const targetZ=helicopter.occupied?helicopter.z+1.05:car.occupied?1.08:player.z+1.55-player.crouchAmount*.32;
   const followDistance=helicopter.occupied?13:car.occupied?11.5:8.5;
   const pitch=clamp(orbitPitch,-2.4,.55);
   const minimumDistance=helicopter.occupied?2.3:car.occupied?1.8:.6;
@@ -604,13 +710,15 @@ function helicopterBoxes(source=helicopter,styleIndex=localStyle) {
 
 function personBoxes(source=player,local=true,scale=.8,styleIndex=localStyle) {
   const style=playerStyles[styleIndex%playerStyles.length];
+  const crouch=source.crouchAmount??(source.crouching?1:0);
+  const heightScale=1-crouch*.24;
   const a = source.facing;
   const moving = local&&(keys.has("KeyW") || keys.has("KeyS") || keys.has("KeyA") || keys.has("KeyD"));
   const phase = moving ? Math.sin(performance.now() * .012) : 0;
   const x = source.x, y = source.y, lift = source.z;
   const box=(forward,side,spec)=>offsetBox(x,y,a,forward*scale,side*scale,{
     ...spec,length:spec.length*scale,width:spec.width*scale,
-    z0:lift+(spec.z0-lift)*scale,z1:lift+(spec.z1-lift)*scale
+    z0:lift+(spec.z0-lift)*scale*heightScale,z1:lift+(spec.z1-lift)*scale*heightScale
   });
   return [
     box(0,0,{ length:.52,width:.58,z0:1.45+lift,z1:2.02+lift,color:style.skin,chars:["@","%"] }),
@@ -665,6 +773,7 @@ function renderDynamicModels() {
     boxes.push(...personBoxes(avatar,false,scale,peer.style));
   }
   if (!boxes.length) return;
+  const pitchCos=Math.cos(view.pitch), pitchSin=Math.sin(view.pitch);
 
   for (let x=0; x<cols; x++) {
     const rayAngle=rayAngles[x];
@@ -682,8 +791,10 @@ function renderDynamicModels() {
       const ch=box.chars[hit.axis];
       for (let y=Math.max(0,top); y<Math.min(rows,bottom); y++) {
         const index=y*cols+x;
-        if (depth<objectDepth[index]&&depth<sceneDepth[index]) {
-          objectDepth[index]=depth;
+        const worldZ=clamp(unprojectScreenHeight(y+.5,depth),box.z0,box.z1);
+        const cellDepth=depth*pitchCos+(worldZ-view.z)*pitchSin;
+        if (cellDepth>.04&&cellDepth<objectDepth[index]&&cellDepth<sceneDepth[index]) {
+          objectDepth[index]=cellDepth;
           put(x,y,ch,color);
         }
       }
@@ -797,7 +908,7 @@ function renderHud() {
     put(mapX+mx, mapY+my+4, t.solid?"#":t.road?".":"·", t.solid?"#477b52":"#78bc85");
   }
   put(mapX, mapY+4, helicopter.occupied?"H":car.occupied?"V":"@", "#e6ff81");
-  const help = helicopter.occupied ? "W/S FLY  A/D YAW  SPACE RISE  SHIFT DESCEND  CTRL+MOUSE FREE LOOK  E EXIT  V VIEW" : car.occupied ? "W/S THROTTLE  A/D STEER  SPACE BRAKE  CTRL+MOUSE FREE LOOK  E EXIT  V VIEW" : "WASD MOVE  SHIFT SPRINT  SPACE JUMP  E VEHICLE  V VIEW";
+  const help = helicopter.occupied ? "W/S FLY  A/D YAW  SPACE RISE  SHIFT DESCEND  CTRL+MOUSE FREE LOOK  E EXIT  V VIEW" : car.occupied ? "W/S THROTTLE  A/D STEER  SPACE BRAKE  CTRL+MOUSE FREE LOOK  E EXIT  V VIEW" : "WASD MOVE  DOUBLE-W SPRINT  SHIFT SNEAK  SPACE JUMP  E VEHICLE  V VIEW";
   [...help].forEach((ch,i)=>put(2+i, rows-2, ch, "#4d8158"));
 }
 
@@ -826,9 +937,9 @@ function paint() {
 
 function movePlayer(dx, dy) {
   const nx = player.x + dx;
-  if (!roofEdgeBlocked(nx,player.y)&&!walkingBlocked(nx, player.y,player.z)) player.x = nx;
+  if ((!player.crouching||!roofEdgeBlocked(nx,player.y))&&!walkingBlocked(nx, player.y,player.z)) player.x = nx;
   const ny = player.y + dy;
-  if (!roofEdgeBlocked(player.x,ny)&&!walkingBlocked(player.x, ny,player.z)) player.y = ny;
+  if ((!player.crouching||!roofEdgeBlocked(player.x,ny))&&!walkingBlocked(player.x, ny,player.z)) player.y = ny;
 }
 
 function update(dt) {
@@ -858,9 +969,13 @@ function update(dt) {
 }
 
 function updateWalking(dt) {
-  const speed = keys.has("ShiftLeft") || keys.has("ShiftRight") ? 5.2 : 3.25;
+  player.crouching=keys.has("ShiftLeft")||keys.has("ShiftRight");
+  player.crouchAmount+=(Number(player.crouching)-player.crouchAmount)*(1-Math.exp(-dt*11));
+  if (player.crouching) player.sprinting=false;
   let forward = (keys.has("KeyW") ? 1 : 0) - (keys.has("KeyS") ? 1 : 0);
   let strafe = (keys.has("KeyD") ? 1 : 0) - (keys.has("KeyA") ? 1 : 0);
+  if (forward<=0) player.sprinting=false;
+  const speed=player.crouching?1.35:player.sprinting&&forward>0?5.8:3.25;
   if (forward && strafe) { forward *= .707; strafe *= .707; }
   const movementAngle=cameraMode==="third"?orbitYaw:player.angle;
   const moveX = Math.cos(movementAngle)*forward + Math.cos(movementAngle+Math.PI/2)*strafe;
@@ -948,8 +1063,10 @@ function toggleVehicle() {
       if (!collides(ex,ey)) { player.x=ex; player.y=ey; car.occupied=false; car.speed=0; return; }
     }
   } else if (Math.hypot(player.x-helicopter.x, player.y-helicopter.y) < 2.7&&Math.abs(player.z-helicopter.z)<1.5) {
+    player.sprinting=false; player.crouching=false; player.crouchAmount=0;
     helicopter.occupied=true; player.x=helicopter.x; player.y=helicopter.y; player.z=helicopter.z; player.angle=helicopter.angle; player.facing=helicopter.angle;
   } else if (Math.hypot(player.x-car.x, player.y-car.y) < 2.1) {
+    player.sprinting=false; player.crouching=false; player.crouchAmount=0;
     car.occupied = true; player.x=car.x; player.y=car.y; player.angle=car.angle; player.facing=car.angle;
   }
 }
@@ -966,7 +1083,8 @@ function acceptPeerState(id,state) {
     style:Math.floor(networkNumber(state.style,old?.style||0,0,playerStyles.length-1)),
     player:{
       x:networkNumber(state.player?.x,old?.player.x||0),y:networkNumber(state.player?.y,old?.player.y||0),
-      z:networkNumber(state.player?.z,old?.player.z||0,0,80),facing:networkNumber(state.player?.facing,old?.player.facing||0,-1000,1000)
+      z:networkNumber(state.player?.z,old?.player.z||0,0,80),facing:networkNumber(state.player?.facing,old?.player.facing||0,-1000,1000),
+      crouching:Boolean(state.player?.crouching)
     },
     car:{
       x:networkNumber(state.car?.x,old?.car.x||0),y:networkNumber(state.car?.y,old?.car.y||0),
@@ -995,7 +1113,7 @@ function assignNetworkSpawn(index) {
 function localNetworkState() {
   return {
     style:localStyle,
-    player:{x:player.x,y:player.y,z:player.z,facing:player.facing},
+    player:{x:player.x,y:player.y,z:player.z,facing:player.facing,crouching:player.crouching},
     car:{x:car.x,y:car.y,angle:car.angle,occupied:car.occupied},
     helicopter:{x:helicopter.x,y:helicopter.y,z:helicopter.z,angle:helicopter.angle,rotorAngle:helicopter.rotorAngle,occupied:helicopter.occupied}
   };
@@ -1043,6 +1161,11 @@ addEventListener("resize", resize);
 addEventListener("keydown", e => {
   keys.add(e.code);
   if (["Space","ArrowUp","ArrowDown"].includes(e.code)) e.preventDefault();
+  if (e.code==="KeyW"&&!e.repeat&&!car.occupied&&!helicopter.occupied) {
+    const now=performance.now();
+    if (forwardReleased&&now-lastForwardTap<=320) player.sprinting=true;
+    lastForwardTap=now; forwardReleased=false;
+  }
   if (e.code === "Space" && !car.occupied && !helicopter.occupied && player.onGround) { player.vz=5.2; player.onGround=false; }
   if (e.code === "KeyE" && !e.repeat) toggleVehicle();
   if (e.code === "KeyV" && !e.repeat) {
@@ -1059,7 +1182,10 @@ addEventListener("keydown", e => {
     }
   }
 });
-addEventListener("keyup", e => keys.delete(e.code));
+addEventListener("keyup", e => {
+  keys.delete(e.code);
+  if (e.code==="KeyW") { forwardReleased=true; player.sprinting=false; }
+});
 addEventListener("mousemove", e => {
   if (document.pointerLockElement !== canvas || !running) return;
   if (cameraMode === "third") {
@@ -1078,7 +1204,10 @@ playButton.addEventListener("click", () => {
   startPanel.classList.add("hidden"); running=true; lastTime=performance.now(); canvas.requestPointerLock();
 });
 document.addEventListener("pointerlockchange", () => {
-  if (running && document.pointerLockElement !== canvas) { startPanel.classList.remove("hidden"); playButton.textContent="RETURN TO CITY"; running=false; keys.clear(); }
+  if (running && document.pointerLockElement !== canvas) {
+    startPanel.classList.remove("hidden"); playButton.textContent="RETURN TO CITY"; running=false; keys.clear();
+    player.sprinting=false; player.crouching=false; forwardReleased=true;
+  }
 });
 
 resize();

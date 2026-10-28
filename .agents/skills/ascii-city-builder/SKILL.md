@@ -21,7 +21,8 @@ Preserve the game's core identity: the visible world is a character-cell buffer 
 - Keep neighborhood bands deterministic and at least three city blocks wide. Low-rise, mixed, and skyscraper districts should alter height distributions without breaking the global 4.4-unit minimum.
 - Keep generated building height at or above `4.4` world units unless the user explicitly changes the scale contract.
 - Keep collision and rendering driven by the same `tileAt` result; visual geometry must not become passable, or invisible geometry solid.
-- Treat a solid tile's generated height as a valid walking floor when the player is on its roof. Sample support across the player's footprint, guard roof edges, and run stuck recovery before a partially embedded player can become immobilized.
+- Treat a solid tile's generated height as a valid walking floor when the player is on its roof. Sample support across the player's footprint and run stuck recovery before a partially embedded player can become immobilized. Guard roof edges only while the on-foot player is sneaking; normal walking/sprinting may leave the roof.
+- Do not generate interior stairwells. Give fewer than one in five buildings a deterministic player-only exterior spiral ramp, keep ramp tiles blocked to trucks, and render ramp bands through the existing facade pass rather than per-pixel interior ray marching.
 - Camera features should read from `view`; gameplay physics should read and write `player` or `car`.
 - Maintain both first- and third-person behavior when adding movement, vehicles, or camera effects.
 - The truck and helicopter are separate world-space vehicles. Helicopter landing height must come from `tileAt`, animated rotors remain cuboid geometry, and its first-person cockpit uses helicopter-specific instruments.
@@ -35,9 +36,11 @@ Preserve the game's core identity: the visible world is a character-cell buffer 
 - Preserve tower presence near a straight-up first-person view with the smooth upward-only vertical-FOV expansion. Recompute row ray scales from the active focal length each frame so walls, ground, roofs, and facade sampling remain aligned.
 - Sample facade patterns through `unprojectScreenHeight` using absolute world height; linear screen-row interpolation visibly stretches windows and textures under pitch.
 - Use camera-basis rays for ground and roof sampling near vertical look angles so screen rays never flip behind the camera.
+- At steep downward angles or high altitude, refine roof sampling to one cell and compare walls, roofs, and models using camera-forward depth.
 - Render building walls, layered background walls, and roof surfaces into per-cell scene depth so nearer geometry occludes farther geometry without hiding taller structures above it.
 - Preserve the bounded tile cache, precomputed screen-ray tables, per-row pitch calculation, and coarse roof sampling; these prevent procedural hashing and roof DDA from dominating each frame.
 - Tune third-person model size with chase distance before changing world geometry, because model dimensions also define collision and spatial relationships.
+- On foot, `Shift` controls crouch/sneak and ledge protection. Sprint requires a release-separated double tap of `W` followed by holding the second press; synchronize crouching for remote player models.
 - Write pixels only in `paint`. World and HUD code should write characters through `put`.
 
 ## Workflow
